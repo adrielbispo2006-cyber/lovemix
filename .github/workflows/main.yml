@@ -5,8 +5,7 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - 'main.yml'
-      - '.github/workflows/**'
+      - '.github/workflows/main.yml'
       - 'lovemix_pronto_para_compilar.zip'
 
 jobs:
