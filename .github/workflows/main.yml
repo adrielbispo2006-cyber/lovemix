@@ -62,12 +62,18 @@ jobs:
                   raise Exception("compileOptions não encontrado")
               s = s[:m.end()] + "\n        " + flag + s[m.end():]
 
-                    if dep not in s:
+              
+           if dep not in s:
               m = re.search(r'(?m)^(\s*)dependencies\s*\{', s)
               if not m:
                   s += "\n\ndependencies {\n    " + dep + "\n}\n"
               else:
                   s = s[:m.end()] + "\n    " + dep + s[m.end():]
+
+
+  
+                
+    
 
           p.write_text(s)
           print("Desugaring ativado com sucesso!")
