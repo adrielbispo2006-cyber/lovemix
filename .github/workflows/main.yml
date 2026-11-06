@@ -1,0 +1,49 @@
+
+name: Gerar APK LoveMix
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'main.yml'
+      - '.github/workflows/**'
+      - 'lovemix_pronto_para_compilar.zip'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar projeto
+        uses: actions/checkout@v4
+
+      - name: Instalar Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Instalar Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Extrair projeto LoveMix
+        run: |
+          unzip -q lovemix_pronto_para_compilar.zip -d extraido
+          cp -a extraido/lovemix_flutter/. .
+
+      - name: Criar arquivos Android
+        run: flutter create . --platforms=android
+
+      - name: Instalar dependências
+        run: flutter pub get
+
+      - name: Gerar APK
+        run: flutter build apk --release
+
+      - name: Disponibilizar APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: lovemix-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
