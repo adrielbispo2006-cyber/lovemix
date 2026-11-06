@@ -34,7 +34,42 @@ jobs:
 
       - name: Criar arquivos Android
         run: flutter create . --platforms=android
+name: Corrigir Desugaring Android
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
 
+          p = Path("android/app/build.gradle.kts")
+          kts = p.exists()
+
+          if not kts:
+              p = Path("android/app/build.gradle")
+
+          s = p.read_text()
+
+          if kts:
+              flag = "isCoreLibraryDesugaringEnabled = true"
+              dep = 'coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")'
+          else:
+              flag = "coreLibraryDesugaringEnabled true"
+              dep = "coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'"
+
+          if flag not in s:
+              m = re.search(r'compileOptions\s*\{', s)
+              if not m:
+                  raise Exception("compileOptions não encontrado")
+              s = s[:m.end()] + "\n        " + flag + s[m.end():]
+
+          if dep not in s:
+              m = re.search(r'(?m)^(\s*)dependencies\s*\{', s)
+              if not m:
+                  raise Exception("dependencies não encontrado")
+              s = s[:m.end()] + "\n    " + dep + s[m.end():]
+
+          p.write_text(s)
+          print("Desugaring ativado com sucesso!")
+          PY
       - name: Instalar dependências
         run: flutter pub get
 
