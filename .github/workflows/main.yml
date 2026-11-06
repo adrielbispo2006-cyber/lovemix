@@ -33,7 +33,7 @@ jobs:
           cp -a extraido/lovemix_flutter/. .
 
       - name: Criar arquivos Android
-        run: flutter create . --platforms=androi        
+        run: flutter create . --platforms=android
       - name: Corrigir Desugaring Android
         run: |
         
