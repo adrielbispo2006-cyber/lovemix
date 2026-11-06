@@ -34,7 +34,7 @@ jobs:
 
       - name: Criar arquivos Android
         run: flutter create . --platforms=android
-      
+
       - name: Corrigir Desugaring Android
         run: |
           python3 - <<'PY'
@@ -65,12 +65,13 @@ jobs:
           if dep not in s:
               s += "\n\ndependencies {\n    " + dep + "\n}\n"
 
-              p.write_text(s)
-             print("Desugaring configurado!")
-            PY
+          p.write_text(s)
+          print("Desugaring configurado!")
+          PY
 
-          - name: Instalar dependências
-       run: flutter pub get
+      - name: Instalar dependências
+        run: flutter pub get
+
       - name: Gerar APK
         run: flutter build apk --release
 
