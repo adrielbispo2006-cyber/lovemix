@@ -65,15 +65,12 @@ jobs:
           if dep not in s:
               s += "\n\ndependencies {\n    " + dep + "\n}\n"
 
-          p.write_text(s)
-          print("Desugaring configurado!")
-          PY
-          p.write_text(s)
-          print("Desugaring ativado com sucesso!")
-          PY
-      - name: Instalar dependências
-        run: flutter pub get
+              p.write_text(s)
+             print("Desugaring configurado!")
+            PY
 
+          - name: Instalar dependências
+       run: flutter pub get
       - name: Gerar APK
         run: flutter build apk --release
 
