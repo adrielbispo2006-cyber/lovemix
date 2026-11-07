@@ -139,6 +139,22 @@ jobs:
       - name: Gerar APK
         run: flutter build apk --release
 
+      - name: Mostrar SHA-1 e SHA-256
+        shell: bash
+        run: |
+          set -e
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)
+
+          if [ -z "$APKSIGNER" ]; then
+            echo "ERRO: apksigner não encontrado!"
+            exit 1
+          fi
+
+          echo "===== CERTIFICADO DO LOVEMIX ====="
+          "$APKSIGNER" verify --print-certs "$APK"
+          echo "===== FIM ====="
+
       - name: Disponibilizar APK
         uses: actions/upload-artifact@v4
         with:
