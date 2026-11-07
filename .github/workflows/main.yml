@@ -47,6 +47,24 @@ jobs:
           fi
           cp -a "$PROJECT"/. .
 
+      - name: Corrigir erros de cores Dart
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          for p in Path("lib").rglob("*.dart"):
+              s = p.read_text(encoding="utf-8")
+              novo = s.replace(
+                  "Colors.white90",
+                  "Colors.white.withOpacity(0.9)"
+              )
+              if novo != s:
+                  p.write_text(novo, encoding="utf-8")
+                  print(f"Corrigido: {p}")
+
+          print("Verificação de cores concluída!")
+          PY
+
       - name: Criar arquivos Android
         run: flutter create . --platforms=android
 
@@ -92,6 +110,9 @@ jobs:
 
       - name: Instalar dependências
         run: flutter pub get
+
+      - name: Verificar código Dart
+        run: flutter analyze --no-pub
 
       - name: Gerar APK
         run: flutter build apk --release
