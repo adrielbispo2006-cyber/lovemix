@@ -6,7 +6,7 @@ on:
   push:
     paths:
       - '.github/workflows/main.yml'
-      - 'LoveMix-versao-namoro-100-moedas-revisado.zip'
+      - 'LoveMix-versao-namoro-revisado.zip'
 
 jobs:
   build:
@@ -30,12 +30,12 @@ jobs:
       - name: Verificar ZIP
         run: |
           ls -lh
-          test -f LoveMix-versao-namoro-100-moedas-revisado.zip
+          test -f LoveMix-versao-namoro-revisado.zip
 
       - name: Extrair projeto LoveMix
         run: |
           mkdir -p extraido
-          unzip -q LoveMix-versao-namoro-100-moedas-revisado.zip -d extraido
+          unzip -q LoveMix-versao-namoro-revisado.zip -d extraido
           find extraido -name pubspec.yaml -print
 
       - name: Localizar projeto Flutter
@@ -51,18 +51,13 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-
           for p in Path("lib").rglob("*.dart"):
               s = p.read_text(encoding="utf-8")
-              novo = s.replace(
-                  "Colors.white90",
-                  "Colors.white.withOpacity(0.9)"
-              )
+              novo = s.replace("Colors.white90", "Colors.white.withOpacity(0.9)")
               if novo != s:
                   p.write_text(novo, encoding="utf-8")
                   print(f"Corrigido: {p}")
-
-          print("Verificação de cores concluída!")
+          print("Verificação concluída!")
           PY
 
       - name: Criar arquivos Android
@@ -72,29 +67,23 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-
           p = Path("android/app/build.gradle.kts")
           kts = p.exists()
-
           if not kts:
               p = Path("android/app/build.gradle")
-
           s = p.read_text()
-
           if kts:
               flag = "isCoreLibraryDesugaringEnabled = true"
               dep = 'coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")'
           else:
               flag = "coreLibraryDesugaringEnabled true"
               dep = "coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'"
-
           if flag not in s:
               pos = s.find("compileOptions {")
               if pos == -1:
                   raise Exception("compileOptions nao encontrado")
               pos += len("compileOptions {")
               s = s[:pos] + "\n        " + flag + s[pos:]
-
           if dep not in s:
               marker = "dependencies {"
               pos = s.find(marker)
@@ -103,7 +92,6 @@ jobs:
               else:
                   pos += len(marker)
                   s = s[:pos] + "\n    " + dep + s[pos:]
-
           p.write_text(s)
           print("Desugaring configurado!")
           PY
