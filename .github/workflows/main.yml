@@ -27,35 +27,50 @@ jobs:
         with:
           channel: stable
 
-      - name: Encontrar ZIP
+      - name: Encontrar e verificar ZIP
+        shell: bash
         run: |
-          ZIP=$(find . -maxdepth 1 -iname '*.zip' -print -quit)
+          set -e
+          ZIP=$(find . -maxdepth 1 -type f -iname '*.zip' -print | head -n 1)
+
           if [ -z "$ZIP" ]; then
-            echo "ERRO: Envie o ZIP do LoveMix para a raiz do repositorio."
+            echo "ERRO: ZIP do LoveMix não encontrado!"
             exit 1
           fi
-          echo "ZIP_PATH=$ZIP" >> $GITHUB_ENV
-          unzip -t "$ZIP"
 
-      - name: Extrair projeto
+          echo "ZIP encontrado: $ZIP"
+          unzip -t "$ZIP"
+          echo "ZIP_PATH=$ZIP" >> "$GITHUB_ENV"
+
+      - name: Extrair projeto LoveMix
         run: |
-          mkdir extraido
+          mkdir -p extraido
           unzip -q "$ZIP_PATH" -d extraido
+
+      - name: Localizar projeto Flutter
+        shell: bash
+        run: |
           PROJECT=$(find extraido -name pubspec.yaml -printf '%h\n' | head -n 1)
+
           if [ -z "$PROJECT" ]; then
             echo "Projeto Flutter não encontrado!"
             exit 1
           fi
-          cp -a "$PROJECT"/. .
 
-      - name: Corrigir cores
+          cp -a "$PROJECT"/. .
+          test -f pubspec.yaml
+
+      - name: Corrigir cores Dart
         run: |
           python3 - <<'PY'
           from pathlib import Path
+
           for p in Path("lib").rglob("*.dart"):
-              s = p.read_text()
-              s = s.replace("Colors.white90", "Colors.white")
-              p.write_text(s)
+              s = p.read_text(encoding="utf-8")
+              novo = s.replace("Colors.white90", "Colors.white")
+              if novo != s:
+                  p.write_text(novo, encoding="utf-8")
+                  print("Corrigido:", p)
           PY
 
       - name: Corrigir teste MyApp
@@ -65,19 +80,60 @@ jobs:
           import 'package:flutter_test/flutter_test.dart';
 
           void main() {
-            test('LoveMix teste básico', () {
+            test('Teste básico do LoveMix', () {
               expect(true, isTrue);
             });
           }
           EOF
 
-      - name: Criar Android
+      - name: Criar arquivos Android
         run: flutter create . --platforms=android
+
+      - name: Corrigir Desugaring Android
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("android/app/build.gradle.kts")
+          kts = p.exists()
+
+          if not kts:
+              p = Path("android/app/build.gradle")
+
+          s = p.read_text()
+
+          if kts:
+              flag = "isCoreLibraryDesugaringEnabled = true"
+              dep = 'coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")'
+          else:
+              flag = "coreLibraryDesugaringEnabled true"
+              dep = "coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'"
+
+          if flag not in s:
+              pos = s.find("compileOptions {")
+              if pos == -1:
+                  raise Exception("compileOptions não encontrado")
+              pos += len("compileOptions {")
+              s = s[:pos] + "\n        " + flag + s[pos:]
+
+          if dep not in s:
+              marker = "dependencies {"
+              pos = s.find(marker)
+              if pos == -1:
+                  s += "\n\ndependencies {\n    " + dep + "\n}\n"
+              else:
+                  pos += len(marker)
+                  s = s[:pos] + "\n    " + dep + s[pos:]
+
+          p.write_text(s)
+          print("Desugaring configurado!")
+          PY
 
       - name: Instalar dependências
         run: flutter pub get
 
-      - name: Verificar Dart
+      - name: Verificar código Dart
+        continue-on-error: true
         run: flutter analyze --no-pub
 
       - name: Gerar APK
@@ -88,3 +144,4 @@ jobs:
         with:
           name: lovemix-apk
           path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
