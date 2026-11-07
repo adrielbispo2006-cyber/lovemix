@@ -6,7 +6,7 @@ on:
   push:
     paths:
       - '.github/workflows/main.yml'
-      - 'LoveMix-com-icone-preto-dourado.zip'
+      - 'LoveMix-versao-namoro-100-moedas-revisado.zip'
 
 jobs:
   build:
@@ -30,12 +30,12 @@ jobs:
       - name: Verificar ZIP
         run: |
           ls -lh
-          test -f LoveMix-com-icone-preto-dourado.zip
+          test -f LoveMix-versao-namoro-100-moedas-revisado.zip
 
       - name: Extrair projeto LoveMix
         run: |
           mkdir -p extraido
-          unzip -q LoveMix-com-icone-preto-dourado.zip -d extraido
+          unzip -q LoveMix-versao-namoro-100-moedas-revisado.zip -d extraido
           find extraido -name pubspec.yaml -print
 
       - name: Localizar projeto Flutter
