@@ -32,7 +32,6 @@ jobs:
         shell: bash
         run: |
           set -e
-
           ZIP=$(find . -maxdepth 1 -type f -iname '*.zip' | head -n 1)
 
           if [ -z "$ZIP" ]; then
@@ -51,7 +50,6 @@ jobs:
       - name: Localizar projeto Flutter
         run: |
           set -e
-
           PROJECT=$(find extraido -name pubspec.yaml -printf '%h\n' | head -n 1)
 
           if [ -z "$PROJECT" ]; then
@@ -102,6 +100,13 @@ jobs:
 
       - name: Criar arquivos Android
         run: flutter create . --platforms=android
+
+      - name: Mostrar SHA-1 e SHA-256 de depuração
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew signingReport
+          cd ..
 
       - name: Configurar Desugaring Android
         run: |
@@ -200,7 +205,7 @@ jobs:
 
           "$APKSIGNER" verify --print-certs "$APK"
 
-      - name: Mostrar SHA-1 e SHA-256 para Firebase
+      - name: Mostrar SHA-1 e SHA-256 do APK de lançamento
         run: |
           set -e
 
@@ -222,10 +227,10 @@ jobs:
           {
             echo "## LoveMix - Firebase"
             echo ""
-            echo "### SHA-1"
+            echo "### SHA-1 do APK de lançamento"
             echo "\`$SHA1\`"
             echo ""
-            echo "### SHA-256"
+            echo "### SHA-256 do APK de lançamento"
             echo "\`$SHA256\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
