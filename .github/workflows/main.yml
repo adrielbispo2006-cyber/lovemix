@@ -32,7 +32,7 @@ jobs:
         shell: bash
         run: |
           set -e
-          ZIP=$(find . -maxdepth 1 -type f -iname '*.zip' -print | head -n 1)
+          ZIP=$(find . -maxdepth 1 -type f -iname '*.zip' | head -n 1)
 
           if [ -z "$ZIP" ]; then
             echo "ERRO: ZIP do LoveMix não encontrado!"
@@ -59,12 +59,24 @@ jobs:
           cp -a "$PROJECT"/. .
           test -f pubspec.yaml
 
-      - name: Verificar ícone LoveMix
+      - name: Localizar ícone original
         run: |
-          if [ ! -f assets/icon/lovemix.png ]; then
-            echo "ERRO: coloque o ícone em assets/icon/lovemix.png"
+          set -e
+
+          ICON=$(find assets extraido -type f \
+            \( -iname 'lovemix.png' -o -iname 'icon.png' \) \
+            2>/dev/null | head -n 1 || true)
+
+          if [ -z "$ICON" ]; then
+            echo "ERRO: ícone original do LoveMix não encontrado!"
+            echo "Adicione o ícone roxo e preto ao projeto."
             exit 1
           fi
+
+          mkdir -p assets/icon
+          cp "$ICON" assets/icon/lovemix.png
+
+          test -s assets/icon/lovemix.png
 
       - name: Configurar ícone roxo e preto
         run: |
@@ -125,7 +137,7 @@ jobs:
         run: flutter pub get
 
       - name: Gerar ícones do aplicativo
-        run: dart run flutter_launcher_icons
+        run: dart run flutter_launcher_icons -f flutter_launcher_icons.yaml
 
       - name: Corrigir cores Dart
         run: |
