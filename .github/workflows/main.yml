@@ -187,6 +187,7 @@ jobs:
 
       - name: Verificar assinatura
         run: |
+          set -e
           APK="build/app/outputs/flutter-apk/app-release.apk"
 
           if [ ! -f "$APK" ]; then
@@ -198,6 +199,38 @@ jobs:
             -type f -name apksigner | sort -V | tail -n 1)
 
           "$APKSIGNER" verify --print-certs "$APK"
+
+      - name: Mostrar SHA-1 e SHA-256 para Firebase
+        run: |
+          set -e
+
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" \
+            -type f -name apksigner | sort -V | tail -n 1)
+
+          "$APKSIGNER" verify --print-certs "$APK" > cert.txt
+
+          SHA1=$(grep "SHA-1 digest:" cert.txt | head -n 1 | awk '{print $3}')
+          SHA256=$(grep "SHA-256 digest:" cert.txt | head -n 1 | awk '{print $3}')
+
+          if [ -z "$SHA1" ] || [ -z "$SHA256" ]; then
+            echo "Não foi possível obter as impressões digitais!"
+            exit 1
+          fi
+
+          {
+            echo "## LoveMix - Firebase"
+            echo ""
+            echo "### SHA-1"
+            echo "\`$SHA1\`"
+            echo ""
+            echo "### SHA-256"
+            echo "\`$SHA256\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "SHA-1: $SHA1"
+          echo "SHA-256: $SHA256"
 
       - name: Disponibilizar APK
         uses: actions/upload-artifact@v4
