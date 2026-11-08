@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/**'
       - '*.zip'
+      - 'assets/icon/**'
 
 jobs:
   build:
@@ -38,7 +39,6 @@ jobs:
             exit 1
           fi
 
-          echo "ZIP encontrado: $ZIP"
           unzip -t "$ZIP"
           echo "ZIP_PATH=$ZIP" >> "$GITHUB_ENV"
 
@@ -48,7 +48,6 @@ jobs:
           unzip -q "$ZIP_PATH" -d extraido
 
       - name: Localizar projeto Flutter
-        shell: bash
         run: |
           PROJECT=$(find extraido -name pubspec.yaml -printf '%h\n' | head -n 1)
 
@@ -60,6 +59,74 @@ jobs:
           cp -a "$PROJECT"/. .
           test -f pubspec.yaml
 
+      - name: Verificar ícone LoveMix
+        run: |
+          if [ ! -f assets/icon/lovemix.png ]; then
+            echo "ERRO: coloque o ícone em assets/icon/lovemix.png"
+            exit 1
+          fi
+
+      - name: Configurar ícone roxo e preto
+        run: |
+          flutter pub add --dev flutter_launcher_icons:^0.14.4
+
+          cat > flutter_launcher_icons.yaml <<'EOF'
+          flutter_launcher_icons:
+            android: true
+            ios: false
+            image_path: "assets/icon/lovemix.png"
+            adaptive_icon_background: "#09000F"
+            adaptive_icon_foreground: "assets/icon/lovemix.png"
+            min_sdk_android: 21
+          EOF
+
+      - name: Criar arquivos Android
+        run: flutter create . --platforms=android
+
+      - name: Configurar Desugaring Android
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("android/app/build.gradle.kts")
+          kts = p.exists()
+
+          if not kts:
+              p = Path("android/app/build.gradle")
+
+          s = p.read_text()
+
+          flag = ("isCoreLibraryDesugaringEnabled = true" if kts
+                  else "coreLibraryDesugaringEnabled true")
+
+          dep = ('coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")'
+                 if kts else
+                 "coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'")
+
+          if flag not in s:
+              pos = s.find("compileOptions {")
+              if pos == -1:
+                  raise Exception("compileOptions não encontrado")
+              pos += len("compileOptions {")
+              s = s[:pos] + "\n        " + flag + s[pos:]
+
+          if dep not in s:
+              pos = s.find("dependencies {")
+              if pos == -1:
+                  s += "\ndependencies {\n    " + dep + "\n}\n"
+              else:
+                  pos += len("dependencies {")
+                  s = s[:pos] + "\n    " + dep + s[pos:]
+
+          p.write_text(s)
+          PY
+
+      - name: Instalar dependências
+        run: flutter pub get
+
+      - name: Gerar ícones do aplicativo
+        run: dart run flutter_launcher_icons
+
       - name: Corrigir cores Dart
         run: |
           python3 - <<'PY'
@@ -70,7 +137,6 @@ jobs:
               novo = s.replace("Colors.white90", "Colors.white")
               if novo != s:
                   p.write_text(novo, encoding="utf-8")
-                  print("Corrigido:", p)
           PY
 
       - name: Corrigir teste MyApp
@@ -86,52 +152,6 @@ jobs:
           }
           EOF
 
-      - name: Criar arquivos Android
-        run: flutter create . --platforms=android
-
-      - name: Corrigir Desugaring Android
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          p = Path("android/app/build.gradle.kts")
-          kts = p.exists()
-
-          if not kts:
-              p = Path("android/app/build.gradle")
-
-          s = p.read_text()
-
-          if kts:
-              flag = "isCoreLibraryDesugaringEnabled = true"
-              dep = 'coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")'
-          else:
-              flag = "coreLibraryDesugaringEnabled true"
-              dep = "coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'"
-
-          if flag not in s:
-              pos = s.find("compileOptions {")
-              if pos == -1:
-                  raise Exception("compileOptions não encontrado")
-              pos += len("compileOptions {")
-              s = s[:pos] + "\n        " + flag + s[pos:]
-
-          if dep not in s:
-              marker = "dependencies {"
-              pos = s.find(marker)
-              if pos == -1:
-                  s += "\n\ndependencies {\n    " + dep + "\n}\n"
-              else:
-                  pos += len(marker)
-                  s = s[:pos] + "\n    " + dep + s[pos:]
-
-          p.write_text(s)
-          print("Desugaring configurado!")
-          PY
-
-      - name: Instalar dependências
-        run: flutter pub get
-
       - name: Verificar código Dart
         continue-on-error: true
         run: flutter analyze --no-pub
@@ -139,21 +159,11 @@ jobs:
       - name: Gerar APK
         run: flutter build apk --release
 
-      - name: Mostrar SHA-1 e SHA-256
-        shell: bash
+      - name: Verificar assinatura
         run: |
-          set -e
           APK="build/app/outputs/flutter-apk/app-release.apk"
           APKSIGNER=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)
-
-          if [ -z "$APKSIGNER" ]; then
-            echo "ERRO: apksigner não encontrado!"
-            exit 1
-          fi
-
-          echo "===== CERTIFICADO DO LOVEMIX ====="
           "$APKSIGNER" verify --print-certs "$APK"
-          echo "===== FIM ====="
 
       - name: Disponibilizar APK
         uses: actions/upload-artifact@v4
