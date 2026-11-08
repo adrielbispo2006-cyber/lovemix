@@ -32,6 +32,7 @@ jobs:
         shell: bash
         run: |
           set -e
+
           ZIP=$(find . -maxdepth 1 -type f -iname '*.zip' | head -n 1)
 
           if [ -z "$ZIP" ]; then
@@ -49,6 +50,8 @@ jobs:
 
       - name: Localizar projeto Flutter
         run: |
+          set -e
+
           PROJECT=$(find extraido -name pubspec.yaml -printf '%h\n' | head -n 1)
 
           if [ -z "$PROJECT" ]; then
@@ -60,23 +63,28 @@ jobs:
           test -f pubspec.yaml
 
       - name: Localizar ícone original
+        shell: bash
         run: |
           set -e
 
-          ICON=$(find assets extraido -type f \
-            \( -iname 'lovemix.png' -o -iname 'icon.png' \) \
-            2>/dev/null | head -n 1 || true)
+          if [ -s assets/icon/lovemix.png ]; then
+            echo "Ícone original já encontrado!"
+          else
+            ICON=$(find extraido -type f \
+              \( -iname 'lovemix.png' -o -iname 'icon.png' \) \
+              -print -quit)
 
-          if [ -z "$ICON" ]; then
-            echo "ERRO: ícone original do LoveMix não encontrado!"
-            echo "Adicione o ícone roxo e preto ao projeto."
-            exit 1
+            if [ -z "$ICON" ]; then
+              echo "ERRO: ícone roxo e preto não encontrado!"
+              exit 1
+            fi
+
+            mkdir -p assets/icon
+            cp "$ICON" assets/icon/lovemix.png
           fi
 
-          mkdir -p assets/icon
-          cp "$ICON" assets/icon/lovemix.png
-
           test -s assets/icon/lovemix.png
+          echo "Ícone LoveMix confirmado!"
 
       - name: Configurar ícone roxo e preto
         run: |
@@ -108,12 +116,17 @@ jobs:
 
           s = p.read_text()
 
-          flag = ("isCoreLibraryDesugaringEnabled = true" if kts
-                  else "coreLibraryDesugaringEnabled true")
+          flag = (
+              "isCoreLibraryDesugaringEnabled = true"
+              if kts else
+              "coreLibraryDesugaringEnabled true"
+          )
 
-          dep = ('coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")'
-                 if kts else
-                 "coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'")
+          dep = (
+              'coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")'
+              if kts else
+              "coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'"
+          )
 
           if flag not in s:
               pos = s.find("compileOptions {")
@@ -154,6 +167,7 @@ jobs:
       - name: Corrigir teste MyApp
         run: |
           mkdir -p test
+
           cat > test/widget_test.dart <<'EOF'
           import 'package:flutter_test/flutter_test.dart';
 
@@ -174,7 +188,15 @@ jobs:
       - name: Verificar assinatura
         run: |
           APK="build/app/outputs/flutter-apk/app-release.apk"
-          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)
+
+          if [ ! -f "$APK" ]; then
+            echo "APK não encontrado!"
+            exit 1
+          fi
+
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" \
+            -type f -name apksigner | sort -V | tail -n 1)
+
           "$APKSIGNER" verify --print-certs "$APK"
 
       - name: Disponibilizar APK
