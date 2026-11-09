@@ -468,6 +468,46 @@ jobs:
                   p.write_text(novo, encoding="utf-8")
           PY
 
+      - name: Corrigir erros de código Dart
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # 1) flutter_local_notifications 22.x usa parâmetros nomeados
+          n = Path("lib/services/notification_service.dart")
+          if n.exists():
+              s = n.read_text(encoding="utf-8")
+              s = s.replace(
+                  "await _local.initialize(settings);",
+                  "await _local.initialize(settings: settings);"
+              )
+              s = s.replace(
+                  "await _local.show(\n      message.hashCode,\n      title,\n      body,\n      NotificationDetails(",
+                  "await _local.show(\n      id: message.hashCode,\n      title: title,\n      body: body,\n      notificationDetails: NotificationDetails("
+              )
+              n.write_text(s, encoding="utf-8")
+
+          # 2) Parêntese sobrando na tela de interações da sala (ZEGO)
+          z = Path("lib/screens/zego_live_screen.dart")
+          if z.exists():
+              s = z.read_text(encoding="utf-8")
+              old = (
+                  "                }),\n"
+                  "              ),\n"
+                  "              const SizedBox(height: 14),\n"
+                  "              SizedBox(width: double.infinity, child: ElevatedButton.icon("
+              )
+              new = (
+                  "                }),\n"
+                  "              const SizedBox(height: 14),\n"
+                  "              SizedBox(width: double.infinity, child: ElevatedButton.icon("
+              )
+              s = s.replace(old, new)
+              z.write_text(s, encoding="utf-8")
+
+          print("Correções Dart aplicadas!")
+          PY
+
       - name: Corrigir teste MyApp
         run: |
           mkdir -p test
