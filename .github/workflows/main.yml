@@ -4,10 +4,12 @@ name: Gerar APK LoveMix
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     paths:
       - '.github/workflows/**'
       - '*.zip'
-      - 'assets/icon/**'
+      - 'assets/**'
 
 jobs:
   build:
@@ -17,7 +19,7 @@ jobs:
       - name: Baixar projeto
         uses: actions/checkout@v4
 
-      - name: Instalar Java
+      - name: Instalar Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -27,11 +29,13 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: stable
+          cache: true
 
       - name: Encontrar e verificar ZIP
         shell: bash
         run: |
           set -e
+
           ZIP=$(find . -maxdepth 1 -type f -iname '*.zip' | head -n 1)
 
           if [ -z "$ZIP" ]; then
@@ -50,30 +54,28 @@ jobs:
       - name: Localizar projeto Flutter
         run: |
           set -e
+
           PROJECT=$(find extraido -name pubspec.yaml -printf '%h\n' | head -n 1)
 
           if [ -z "$PROJECT" ]; then
-            echo "Projeto Flutter não encontrado!"
+            echo "ERRO: Projeto Flutter não encontrado!"
             exit 1
           fi
 
           cp -a "$PROJECT"/. .
           test -f pubspec.yaml
 
-      - name: Localizar ícone original
-        shell: bash
+      - name: Verificar ícone LoveMix
         run: |
           set -e
 
-          if [ -s assets/icon/lovemix.png ]; then
-            echo "Ícone original já encontrado!"
-          else
+          if [ ! -s assets/icon/lovemix.png ]; then
             ICON=$(find extraido -type f \
               \( -iname 'lovemix.png' -o -iname 'icon.png' \) \
               -print -quit)
 
             if [ -z "$ICON" ]; then
-              echo "ERRO: ícone roxo e preto não encontrado!"
+              echo "ERRO: Ícone não encontrado!"
               exit 1
             fi
 
@@ -82,24 +84,311 @@ jobs:
           fi
 
           test -s assets/icon/lovemix.png
-          echo "Ícone LoveMix confirmado!"
+          echo "Ícone LoveMix encontrado!"
 
-      - name: Configurar ícone roxo e preto
-        run: |
-          flutter pub add --dev flutter_launcher_icons:^0.14.4
-
-          cat > flutter_launcher_icons.yaml <<'EOF'
-          flutter_launcher_icons:
-            android: true
-            ios: false
-            image_path: "assets/icon/lovemix.png"
-            adaptive_icon_background: "#09000F"
-            adaptive_icon_foreground: "assets/icon/lovemix.png"
-            min_sdk_android: 21
-          EOF
-
-      - name: Criar arquivos Android
+      - name: Criar estrutura Android
         run: flutter create . --platforms=android
+
+      - name: Fixar versões do Gradle e Kotlin
+        shell: bash
+        run: |
+          set -e
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          settings = Path("android/settings.gradle.kts")
+
+          if not settings.exists():
+              raise SystemExit("ERRO: settings.gradle.kts não encontrado!")
+
+          s = settings.read_text()
+
+          if not re.search(r'plugins\s*\{', s):
+              raise SystemExit("ERRO: bloco plugins não encontrado!")
+
+          versions = {
+              "com.android.application": "8.13.0",
+              "com.android.library": "8.13.0",
+              "org.jetbrains.kotlin.android": "2.2.20",
+              "com.google.gms.google-services": "4.4.2",
+          }
+
+          for plugin, version in versions.items():
+              pattern = (
+                  r'id\(["\']' + re.escape(plugin) +
+                  r'["\']\)\s+version\s+["\'][^"\']+["\']'
+                  r'(?:\s+apply\s+false)?'
+              )
+
+              replacement = (
+                  f'id("{plugin}") version "{version}" apply false'
+              )
+
+              if re.search(pattern, s):
+                  s = re.sub(pattern, replacement, s, count=1)
+              else:
+                  s = re.sub(
+                      r'plugins\s*\{',
+                      lambda m: m.group(0) + '\n    ' + replacement,
+                      s,
+                      count=1
+                  )
+
+          settings.write_text(s)
+
+          wrapper = Path("android/gradle/wrapper/gradle-wrapper.properties")
+
+          if not wrapper.exists():
+              raise SystemExit("ERRO: Gradle Wrapper não encontrado!")
+
+          w = wrapper.read_text()
+
+          w = re.sub(
+              r'^distributionUrl=.*$',
+              'distributionUrl=https\\://services.gradle.org/distributions/gradle-8.13-bin.zip',
+              w,
+              flags=re.M
+          )
+
+          if "distributionUrl=" not in w:
+              w += "\ndistributionUrl=https\\://services.gradle.org/distributions/gradle-8.13-bin.zip\n"
+
+          wrapper.write_text(w)
+
+          print("AGP 8.13.0")
+          print("Kotlin 2.2.20")
+          print("Gradle 8.13")
+          print("Android Library configurado!")
+          PY
+
+      - name: Configurar Android e Desugaring
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("android/app/build.gradle.kts")
+
+          if not p.exists():
+              raise SystemExit("ERRO: build.gradle.kts não encontrado!")
+
+          s = p.read_text()
+
+          s = re.sub(
+              r'compileSdk\s*=\s*[^\n]+',
+              'compileSdk = 36',
+              s,
+              count=1
+          )
+
+          if "isCoreLibraryDesugaringEnabled" not in s:
+              m = re.search(r'compileOptions\s*\{', s)
+              if not m:
+                  raise SystemExit("compileOptions não encontrado!")
+              s = (
+                  s[:m.end()]
+                  + '\n        isCoreLibraryDesugaringEnabled = true'
+                  + s[m.end():]
+              )
+
+          dep = 'coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")'
+
+          if "desugar_jdk_libs" not in s:
+              m = re.search(r'dependencies\s*\{', s)
+              if m:
+                  s = s[:m.end()] + '\n    ' + dep + s[m.end():]
+              else:
+                  s += '\ndependencies {\n    ' + dep + '\n}\n'
+
+          manifest = Path("android/app/src/main/AndroidManifest.xml")
+          content = manifest.read_text()
+
+          permissions = [
+              "android.permission.INTERNET",
+              "android.permission.CAMERA",
+              "android.permission.RECORD_AUDIO",
+              "android.permission.MODIFY_AUDIO_SETTINGS",
+              "android.permission.POST_NOTIFICATIONS",
+          ]
+
+          for permission in permissions:
+              tag = f'<uses-permission android:name="{permission}"/>'
+              if permission not in content:
+                  content = content.replace(
+                      '<application',
+                      '    ' + tag + '\n    <application',
+                      1
+                  )
+
+          manifest.write_text(content)
+          p.write_text(s)
+
+          print("Desugaring e permissões configurados!")
+          PY
+
+      - name: Configurar Firebase e Google Login
+        run: |
+          set -e
+
+          if [ ! -f google-services.json ]; then
+            echo "ERRO: google-services.json não encontrado!"
+            exit 1
+          fi
+
+          mkdir -p android/app
+          cp google-services.json android/app/google-services.json
+
+          python3 - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+          import os
+
+          config = json.loads(
+              Path("android/app/google-services.json").read_text()
+          )
+
+          client = config["client"][0]
+
+          package = client["client_info"]["android_client_info"]["package_name"]
+
+          if package != "com.example.lovemix":
+              raise SystemExit(
+                  "ERRO: pacote Firebase diferente de com.example.lovemix: "
+                  + package
+              )
+
+          oauth = client.get("oauth_client", [])
+
+          web = next(
+              (
+                  x.get("client_id", "")
+                  for x in oauth
+                  if str(x.get("client_type")) == "3"
+              ),
+              ""
+          )
+
+          if not web.endswith(".apps.googleusercontent.com"):
+              raise SystemExit("ERRO: cliente OAuth WEB não encontrado!")
+
+          settings = Path("android/settings.gradle.kts")
+          s = settings.read_text()
+
+          app = Path("android/app/build.gradle.kts")
+          a = app.read_text()
+
+          marker = 'id("com.google.gms.google-services")'
+
+          if marker not in a:
+              a = a.replace(
+                  "plugins {",
+                  "plugins {\n    " + marker,
+                  1
+              )
+
+          a = re.sub(
+              r'namespace\s*=\s*"[^"]+"',
+              f'namespace = "{package}"',
+              a,
+              count=1
+          )
+
+          a = re.sub(
+              r'applicationId\s*=\s*"[^"]+"',
+              f'applicationId = "{package}"',
+              a,
+              count=1
+          )
+
+          app.write_text(a)
+
+          with open(os.environ["GITHUB_ENV"], "a") as f:
+              f.write(f"GOOGLE_SERVER_CLIENT_ID={web}\n")
+
+          print("Firebase configurado!")
+          print("Google Login configurado!")
+          print("Pacote:", package)
+          PY
+
+      - name: Instalar dependências Flutter
+        run: flutter pub get
+
+      - name: Corrigir Gradle do Zego ZIM 3.2.0
+        shell: bash
+        run: |
+          set -e
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          cache = Path.home() / ".pub-cache/hosted/pub.dev"
+
+          files = sorted(cache.glob("zego_zim-*/android/build.gradle"))
+
+          if not files:
+              raise SystemExit(
+                  "ERRO: zego_zim não encontrado após flutter pub get!"
+              )
+
+          for p in files:
+              s = p.read_text()
+
+              # Remover jcenter antigo
+              s = re.sub(
+                  r'\bjcenter\s*\(\s*\)',
+                  'mavenCentral()',
+                  s
+              )
+
+              # Garantir Android Library antes do Kotlin
+              android_plugin = (
+                  r'id\s*\(?\s*["\']com\.android\.library["\']'
+                  r'|apply\s+plugin\s*:\s*["\']com\.android\.library["\']'
+              )
+
+              if not re.search(android_plugin, s):
+                  m = re.search(r'plugins\s*\{', s)
+
+                  if m:
+                      s = (
+                          s[:m.end()]
+                          + "\n    id 'com.android.library'"
+                          + s[m.end():]
+                      )
+                  else:
+                      m = re.search(
+                          r'(?m)^\s*apply\s+plugin\s*:\s*'
+                          r'["\'](?:kotlin-android|org\.jetbrains\.kotlin\.android)["\']',
+                          s
+                      )
+
+                      if m:
+                          s = (
+                              s[:m.start()]
+                              + "apply plugin: 'com.android.library'\n"
+                              + s[m.start():]
+                          )
+                      else:
+                          s = "apply plugin: 'com.android.library'\n" + s
+
+              p.write_text(s)
+
+              check = p.read_text()
+
+              if re.search(r'\bjcenter\s*\(', check):
+                  raise SystemExit("ERRO: jcenter ainda encontrado!")
+
+              if not re.search(android_plugin, check):
+                  raise SystemExit("ERRO: plugin Android Library ausente!")
+
+              print("Zego corrigido:", p)
+
+          print("Correção do Zego concluída!")
+          PY
 
       - name: Mostrar SHA-1 e SHA-256 de depuração
         run: |
@@ -108,54 +397,9 @@ jobs:
           ./gradlew signingReport
           cd ..
 
-      - name: Configurar Desugaring Android
+      - name: Gerar ícones do LoveMix
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          p = Path("android/app/build.gradle.kts")
-          kts = p.exists()
-
-          if not kts:
-              p = Path("android/app/build.gradle")
-
-          s = p.read_text()
-
-          flag = (
-              "isCoreLibraryDesugaringEnabled = true"
-              if kts else
-              "coreLibraryDesugaringEnabled true"
-          )
-
-          dep = (
-              'coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")'
-              if kts else
-              "coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'"
-          )
-
-          if flag not in s:
-              pos = s.find("compileOptions {")
-              if pos == -1:
-                  raise Exception("compileOptions não encontrado")
-              pos += len("compileOptions {")
-              s = s[:pos] + "\n        " + flag + s[pos:]
-
-          if dep not in s:
-              pos = s.find("dependencies {")
-              if pos == -1:
-                  s += "\ndependencies {\n    " + dep + "\n}\n"
-              else:
-                  pos += len("dependencies {")
-                  s = s[:pos] + "\n    " + dep + s[pos:]
-
-          p.write_text(s)
-          PY
-
-      - name: Instalar dependências
-        run: flutter pub get
-
-      - name: Gerar ícones do aplicativo
-        run: dart run flutter_launcher_icons -f flutter_launcher_icons.yaml
+          dart run flutter_launcher_icons -f pubspec.yaml
 
       - name: Corrigir cores Dart
         run: |
@@ -165,6 +409,7 @@ jobs:
           for p in Path("lib").rglob("*.dart"):
               s = p.read_text(encoding="utf-8")
               novo = s.replace("Colors.white90", "Colors.white")
+
               if novo != s:
                   p.write_text(novo, encoding="utf-8")
           PY
@@ -187,25 +432,25 @@ jobs:
         continue-on-error: true
         run: flutter analyze --no-pub
 
-      - name: Gerar APK
-        run: flutter build apk --release
+      - name: Gerar APK LoveMix
+        run: |
+          flutter build apk --release \
+            --dart-define=GOOGLE_SERVER_CLIENT_ID="$GOOGLE_SERVER_CLIENT_ID"
 
-      - name: Verificar assinatura
+      - name: Verificar assinatura do APK
         run: |
           set -e
+
           APK="build/app/outputs/flutter-apk/app-release.apk"
 
-          if [ ! -f "$APK" ]; then
-            echo "APK não encontrado!"
-            exit 1
-          fi
+          test -f "$APK"
 
           APKSIGNER=$(find "$ANDROID_HOME/build-tools" \
             -type f -name apksigner | sort -V | tail -n 1)
 
           "$APKSIGNER" verify --print-certs "$APK"
 
-      - name: Mostrar SHA-1 e SHA-256 do APK de lançamento
+      - name: Mostrar SHA-1 e SHA-256 do APK
         run: |
           set -e
 
@@ -219,19 +464,12 @@ jobs:
           SHA1=$(grep "SHA-1 digest:" cert.txt | head -n 1 | awk '{print $3}')
           SHA256=$(grep "SHA-256 digest:" cert.txt | head -n 1 | awk '{print $3}')
 
-          if [ -z "$SHA1" ] || [ -z "$SHA256" ]; then
-            echo "Não foi possível obter as impressões digitais!"
-            exit 1
-          fi
-
           {
-            echo "## LoveMix - Firebase"
+            echo "## LoveMix - Certificados"
             echo ""
-            echo "### SHA-1 do APK de lançamento"
-            echo "\`$SHA1\`"
+            echo "SHA-1: $SHA1"
             echo ""
-            echo "### SHA-256 do APK de lançamento"
-            echo "\`$SHA256\`"
+            echo "SHA-256: $SHA256"
           } >> "$GITHUB_STEP_SUMMARY"
 
           echo "SHA-1: $SHA1"
