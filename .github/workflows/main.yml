@@ -113,6 +113,39 @@ jobs:
           print("compileSdk 36 e permissões de câmera/microfone configurados.")
           PY
 
+      - name: Forçar compileSdk 36 em todos os plugins (corrige ZEGO android-31)
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path("android/build.gradle.kts")
+          if not root.exists():
+              raise SystemExit("ERRO: android/build.gradle.kts não encontrado.")
+          s = root.read_text()
+          if "LOVEMIX_FORCE_COMPILE_SDK" not in s:
+              s += """
+
+          // LOVEMIX_FORCE_COMPILE_SDK
+          // Plugins antigos (ZEGO etc.) declaram compileSdk 31, mas as dependências
+          // AndroidX atuais exigem 33+. Força 36 em todos os módulos Android.
+          subprojects {
+              val forceSdk: Project.() -> Unit = {
+                  val androidExt = extensions.findByName("android")
+                  if (androidExt is com.android.build.gradle.BaseExtension) {
+                      androidExt.compileSdkVersion(36)
+                  }
+              }
+              if (state.executed) {
+                  forceSdk()
+              } else {
+                  afterEvaluate { forceSdk() }
+              }
+          }
+          """
+              root.write_text(s)
+          print("compileSdk 36 forçado em todos os subprojetos.")
+          PY
+
       - name: Otimizar download do Gradle
         run: |
           python3 - <<'PY'
@@ -139,6 +172,11 @@ jobs:
           if [ -n "$GOOGLE_SERVICES_JSON" ]; then
             printf '%s' "$GOOGLE_SERVICES_JSON" > android/app/google-services.json
             echo "Usando GOOGLE_SERVICES_JSON do GitHub Secrets."
+            has_web() { python3 -c "import json,sys; c=json.load(open(sys.argv[1])); sys.exit(0 if any(str(o.get('client_type'))=='3' for cl in c['client'] for o in cl.get('oauth_client',[])) else 1)" "$1" 2>/dev/null; }
+            if ! has_web android/app/google-services.json && [ -f google-services.json ] && has_web google-services.json; then
+              cp google-services.json android/app/google-services.json
+              echo "::warning::O secret GOOGLE_SERVICES_JSON não tem cliente OAuth WEB (client_type 3). Usando o google-services.json do repositório. Atualize ou apague o secret."
+            fi
           elif [ -f google-services.json ]; then
             cp google-services.json android/app/google-services.json
             echo "Usando google-services.json incluído no projeto."
@@ -268,6 +306,38 @@ jobs:
           PYCODE
           echo "ANDROID_KEYSTORE_PATH=$GITHUB_WORKSPACE/android/keystore/lovemix-release.jks" >> "$GITHUB_ENV"
 
+      - name: Mostrar SHA-1 e SHA-256 da chave de assinatura (antes do build)
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          KS="android/keystore/lovemix-release.jks"
+          if [ ! -f "$KS" ]; then
+            echo "Sem chave release (secrets ANDROID_* ausentes)."
+            echo "O SHA da chave debug aparece no fim do build e muda a cada execução."
+            exit 0
+          fi
+          OUT="$(keytool -list -v -keystore "$KS" -alias "$ANDROID_KEY_ALIAS" -storepass "$ANDROID_KEYSTORE_PASSWORD")"
+          SHA1="$(echo "$OUT" | grep -m1 'SHA1:' | awk '{print $2}')"
+          SHA256="$(echo "$OUT" | grep -m1 'SHA256:' | awk '{print $2}')"
+          [ -n "$SHA1" ] && [ -n "$SHA256" ] || { echo "ERRO: não consegui ler os SHA da keystore."; exit 1; }
+          echo "SHA-1:   $SHA1"
+          echo "SHA-256: $SHA256"
+          {
+            echo "## SHA da chave release (para o Firebase)"
+            echo ""
+            echo "**SHA-1**"
+            echo '```'
+            echo "$SHA1"
+            echo '```'
+            echo "**SHA-256**"
+            echo '```'
+            echo "$SHA256"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=SHA-1 (release)::$SHA1"
+          echo "::notice title=SHA-256 (release)::$SHA256"
+
       - name: Instalar dependências
         run: flutter pub get
 
@@ -333,32 +403,6 @@ jobs:
                   raise SystemExit(f"ERRO: plugin Android não foi aplicado em {gradle}")
 
           print("ZEGO ZIM: jcenter() removido e plugin Android garantido antes da configuração Kotlin.")
-          PYCODE
-
-      - name: Forçar compileSdk 36 nos plugins ZEGO (corrige android-31)
-        run: |
-          python3 - <<'PYCODE'
-          from pathlib import Path
-          import re
-
-          cache = Path.home() / ".pub-cache/hosted/pub.dev"
-          files = []
-          for pattern in ("zego_*/android/build.gradle", "zego_*/android/build.gradle.kts"):
-              files += sorted(cache.glob(pattern))
-          if not files:
-              raise SystemExit("ERRO: não encontrei build.gradle dos plugins zego_* no pub-cache.")
-
-          for gradle in files:
-              content = gradle.read_text()
-              original = content
-              kts = gradle.suffix == ".kts"
-              new_line = r"\g<1>compileSdk = 36" if kts else r"\g<1>compileSdk 36"
-              content = re.sub(r"(?m)^(\s*)compileSdk(?:Version)?\b[ \t]*=?[ \t]*[^\n]+$", new_line, content)
-              if content != original:
-                  gradle.write_text(content)
-                  print(f"compileSdk -> 36: {gradle}")
-              else:
-                  print(f"Sem compileSdk para alterar (ou já ok): {gradle}")
           PYCODE
 
       - name: Verificar ícone roxo e preto do LoveMix
@@ -434,8 +478,55 @@ jobs:
           echo "ERRO: não foi possível gerar o APK após 3 tentativas."
           exit 1
 
+      - name: Verificar assinatura do APK
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+          test -s "$APK" || { echo "ERRO: APK não encontrado."; exit 1; }
+          APKSIGNER="$(ls -d "${ANDROID_HOME:-$ANDROID_SDK_ROOT}"/build-tools/*/apksigner | sort -V | tail -1)"
+          echo "Usando $APKSIGNER"
+          "$APKSIGNER" verify --verbose "$APK"
+
+      - name: Mostrar SHA-1 e SHA-256 do APK
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+          APKSIGNER="$(ls -d "${ANDROID_HOME:-$ANDROID_SDK_ROOT}"/build-tools/*/apksigner | sort -V | tail -1)"
+          CERTS="$("$APKSIGNER" verify --print-certs "$APK")"
+
+          # Formata como o Firebase espera: AA:BB:CC:...
+          fmt() { echo "$1" | tr 'a-f' 'A-F' | sed 's/../&:/g; s/:$//'; }
+
+          SHA1_RAW="$(echo "$CERTS" | grep -m1 'certificate SHA-1 digest' | awk '{print $NF}')"
+          SHA256_RAW="$(echo "$CERTS" | grep -m1 'certificate SHA-256 digest' | awk '{print $NF}')"
+          [ -n "$SHA1_RAW" ] && [ -n "$SHA256_RAW" ] || { echo "ERRO: não consegui ler os SHA."; echo "$CERTS"; exit 1; }
+          SHA1="$(fmt "$SHA1_RAW")"
+          SHA256="$(fmt "$SHA256_RAW")"
+
+          {
+            echo "SHA-1:   $SHA1"
+            echo "SHA-256: $SHA256"
+          } | tee build/sha-firebase.txt
+
+          {
+            echo "## Impressões digitais do certificado (para o Firebase)"
+            echo ""
+            echo "**SHA-1**"
+            echo '```'
+            echo "$SHA1"
+            echo '```'
+            echo "**SHA-256**"
+            echo '```'
+            echo "$SHA256"
+            echo '```'
+            echo "Firebase Console > Configurações do projeto > Seus apps > Android > Adicionar impressão digital."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "::notice title=SHA-1::$SHA1"
+          echo "::notice title=SHA-256::$SHA256"
+
       - name: Disponibilizar APK
         uses: actions/upload-artifact@v4
         with:
           name: lovemix-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: |
+            build/app/outputs/flutter-apk/app-release.apk
+            build/sha-firebase.txt
