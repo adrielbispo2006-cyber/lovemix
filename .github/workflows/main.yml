@@ -95,6 +95,44 @@ jobs:
             [ -s "$f" ] && echo "OK: $f" || echo "::warning::Imagem ausente: $f (o workflow tenta achar ou criar uma substituta)."
           done
 
+      - name: Aplicar correções de código conhecidas (Dart)
+        run: |
+          python3 - <<'PYCODE'
+          from pathlib import Path
+
+          def edit(path, pairs):
+              f = Path(path)
+              if not f.exists():
+                  print(f"Pulando (não existe): {path}")
+                  return
+              t = f.read_text()
+              changed = False
+              for old, new in pairs:
+                  if old in t:
+                      t = t.replace(old, new)
+                      changed = True
+              if changed:
+                  f.write_text(t)
+                  print(f"Corrigido: {path}")
+              else:
+                  print(f"Já estava correto: {path}")
+
+          # 1) Parêntese sobrando no GridView.builder da tela de interações.
+          edit("lib/screens/zego_live_screen.dart", [(
+              "                }),\n              ),\n              const SizedBox(height: 14),\n"
+              "              SizedBox(width: double.infinity, child: ElevatedButton.icon(",
+              "                },\n              ),\n              const SizedBox(height: 14),\n"
+              "              SizedBox(width: double.infinity, child: ElevatedButton.icon(",
+          )])
+
+          # 2) flutter_local_notifications 20+: initialize/show usam parâmetros nomeados.
+          edit("lib/services/notification_service.dart", [
+              ("await _local.initialize(settings);", "await _local.initialize(settings: settings);"),
+              ("await _local.show(\n      message.hashCode,\n      title,\n      body,\n      NotificationDetails(",
+               "await _local.show(\n      id: message.hashCode,\n      title: title,\n      body: body,\n      notificationDetails: NotificationDetails("),
+          ])
+          PYCODE
+
       - name: Instalar Java 17
         uses: actions/setup-java@v4
         with:
@@ -665,7 +703,16 @@ jobs:
           PY
 
       - name: Verificar código Dart
-        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+        run: |
+          flutter analyze --no-fatal-infos --no-fatal-warnings > analyze.log 2>&1 && ok=1 || ok=0
+          echo "$(grep -c -E '^\s*error •' analyze.log || true) erro(s) de código encontrados."
+          if [ "$ok" -ne 1 ]; then
+            echo "=============== ERROS (só os que impedem o build) ==============="
+            grep -E '^\s*error •' analyze.log || tail -30 analyze.log
+            echo "================================================================="
+            exit 1
+          fi
+          tail -3 analyze.log
 
       - name: Compilar APK release
         env:
