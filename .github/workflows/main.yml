@@ -12,6 +12,44 @@ jobs:
       - name: Baixar projeto
         uses: actions/checkout@v4
 
+      - name: Localizar o projeto Flutter no repositório
+        run: |
+          if [ -f pubspec.yaml ] && [ -f lib/main.dart ]; then
+            echo "Projeto encontrado na raiz do repositório."
+            exit 0
+          fi
+
+          # 1) Projeto dentro de uma subpasta (ex.: lovemix_work/)
+          while IFS= read -r f; do
+            d="$(dirname "$f")"
+            if [ -f "$d/lib/main.dart" ]; then
+              echo "Projeto encontrado na subpasta: $d (copiando para a raiz)"
+              cp -a "$d"/. .
+              exit 0
+            fi
+          done < <(find . -maxdepth 4 -name pubspec.yaml -not -path './.git/*' -not -path '*/node_modules/*' | sort)
+
+          # 2) Zip do projeto enviado como arquivo para o repositório
+          while IFS= read -r z; do
+            if unzip -l "$z" 2>/dev/null | grep -q 'pubspec.yaml'; then
+              rm -rf /tmp/proj_zip && mkdir -p /tmp/proj_zip
+              unzip -q "$z" -d /tmp/proj_zip || continue
+              while IFS= read -r f; do
+                d="$(dirname "$f")"
+                if [ -f "$d/lib/main.dart" ]; then
+                  echo "Projeto encontrado dentro do zip: $z (extraindo para a raiz)"
+                  cp -a "$d"/. .
+                  exit 0
+                fi
+              done < <(find /tmp/proj_zip -maxdepth 3 -name pubspec.yaml | sort)
+            fi
+          done < <(find . -maxdepth 3 -iname '*.zip' -not -path './.git/*' | sort -r)
+
+          echo "::error::Não encontrei o projeto Flutter (pubspec.yaml + lib/main.dart) em nenhum lugar do repositório."
+          echo "Conteúdo do repositório:"
+          find . -maxdepth 2 -not -path './.git/*' -not -path './.git' | sort | head -60
+          exit 1
+
       - name: Conferir arquivos do projeto no repositório
         run: |
           missing=0
