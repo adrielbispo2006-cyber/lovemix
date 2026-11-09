@@ -406,67 +406,70 @@ jobs:
         run: flutter pub get
 
 
-      - name: Corrigir Gradle legado do plugin Zego ZIM
+      - name: Corrigir Gradle legado dos plugins Zego (jcenter e ZIM)
         run: |
           python3 - <<'PYCODE'
           from pathlib import Path
-          import re
+          from urllib.parse import unquote, urlparse
+          import json, re
 
-          cache = Path.home() / ".pub-cache/hosted/pub.dev"
-          candidates = sorted(cache.glob("zego_zim-*/android/build.gradle"))
-          if not candidates:
-              raise SystemExit("ERRO: não encontrei o build.gradle Android do pacote zego_zim após flutter pub get.")
+          # Localiza os plugins pelo package_config.json (funciona em qualquer
+          # PUB_CACHE), em vez de assumir ~/.pub-cache.
+          cfg = Path(".dart_tool/package_config.json")
+          if not cfg.exists():
+              raise SystemExit("ERRO: .dart_tool/package_config.json não encontrado (flutter pub get falhou?).")
+          data = json.loads(cfg.read_text())
 
-          for gradle in candidates:
-              content = gradle.read_text()
-              original = content
-              content = re.sub(r"\bjcenter\s*\(\s*\)", "mavenCentral()", content)
+          def pkg_dir(pkg):
+              uri = pkg["rootUri"]
+              if uri.startswith("file://"):
+                  return Path(unquote(urlparse(uri).path))
+              return (cfg.parent / unquote(uri)).resolve()
 
-              # O plugin Android precisa ser aplicado no módulo antes do Kotlin.
+          zego = [p for p in data["packages"] if p["name"].startswith("zego")]
+          print("Pacotes Zego encontrados:", ", ".join(sorted(p["name"] for p in zego)) or "nenhum")
+
+          def ensure_android_plugin(content):
               plugins_match = re.search(r"(?m)^\s*plugins\s*\{", content)
               if plugins_match:
                   block_start = plugins_match.end()
                   block_end = content.find("}", block_start)
                   if block_end == -1:
-                      raise SystemExit(f"ERRO: bloco plugins inválido em {gradle}")
-                  plugin_block = content[block_start:block_end]
-                  if not re.search(r"com\.android\.library", plugin_block):
+                      return content
+                  if not re.search(r"com\.android\.library", content[block_start:block_end]):
                       content = content[:block_start] + "\n    id 'com.android.library'" + content[block_start:]
-              else:
-                  android_apply = re.search(
-                      r"(?m)^\s*apply\s+plugin\s*:\s*['\"]com\.android\.(?:library|application)['\"]",
-                      content
-                  )
-                  if not android_apply:
-                      kotlin_apply = re.search(
-                          r"(?m)^\s*apply\s+plugin\s*:\s*['\"](?:kotlin-android|org\.jetbrains\.kotlin\.android)['\"]",
-                          content
-                      )
-                      line = "apply plugin: 'com.android.library'\n"
-                      if kotlin_apply:
-                          content = content[:kotlin_apply.start()] + line + content[kotlin_apply.start():]
-                      else:
-                          content = line + content
-
-              if content != original:
-                  gradle.write_text(content)
-                  print(f"Corrigido: {gradle}")
-              else:
-                  print(f"Arquivo já estava compatível: {gradle}")
-
-              check = gradle.read_text()
-              if re.search(r"\bjcenter\s*\(", check):
-                  raise SystemExit(f"ERRO: jcenter() ainda aparece em {gradle}")
-              has_android = bool(
-                  re.search(r"id\s*\(?\s*['\"]com\.android\.library['\"]", check)
-                  or re.search(r"apply\s+plugin\s*:\s*['\"]com\.android\.library['\"]", check)
-                  or re.search(r"id\s*\(?\s*['\"]com\.android\.application['\"]", check)
-                  or re.search(r"apply\s+plugin\s*:\s*['\"]com\.android\.application['\"]", check)
+                  return content
+              if re.search(r"(?m)^\s*apply\s+plugin\s*:\s*['\"]com\.android\.(?:library|application)['\"]", content):
+                  return content
+              kotlin_apply = re.search(
+                  r"(?m)^\s*apply\s+plugin\s*:\s*['\"](?:kotlin-android|org\.jetbrains\.kotlin\.android)['\"]",
+                  content,
               )
-              if not has_android:
-                  raise SystemExit(f"ERRO: plugin Android não foi aplicado em {gradle}")
+              line = "apply plugin: 'com.android.library'\n"
+              if kotlin_apply:
+                  return content[:kotlin_apply.start()] + line + content[kotlin_apply.start():]
+              return line + content
 
-          print("ZEGO ZIM: jcenter() removido e plugin Android garantido antes da configuração Kotlin.")
+          for pkg in zego:
+              root = pkg_dir(pkg) / "android"
+              for name in ("build.gradle", "build.gradle.kts"):
+                  gradle = root / name
+                  if not gradle.exists():
+                      continue
+                  content = gradle.read_text()
+                  original = content
+                  content = re.sub(r"\bjcenter\s*\(\s*\)", "mavenCentral()", content)
+                  if pkg["name"] == "zego_zim" and name == "build.gradle":
+                      content = ensure_android_plugin(content)
+                  if content != original:
+                      gradle.write_text(content)
+                      print(f"Corrigido: {gradle}")
+                  else:
+                      print(f"Já compatível: {gradle}")
+
+          if not any(p["name"] == "zego_zim" for p in zego):
+              print("AVISO: zego_zim não está nas dependências; nada a corrigir no ZIM.")
+          print("Correção dos plugins Zego concluída.")
           PYCODE
 
       - name: Verificar ícone roxo e preto do LoveMix
