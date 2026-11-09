@@ -95,42 +95,897 @@ jobs:
             [ -s "$f" ] && echo "OK: $f" || echo "::warning::Imagem ausente: $f (o workflow tenta achar ou criar uma substituta)."
           done
 
-      - name: Aplicar correções de código conhecidas (Dart)
+      - name: Aplicar código corrigido do ZEGO e das notificações
         run: |
+          mkdir -p lib/screens lib/services
+
+          cat > /tmp/novo_zego_live_screen.dart <<'LOVEMIX_ZEGO'
+          import 'package:cloud_firestore/cloud_firestore.dart';
+          import 'package:firebase_auth/firebase_auth.dart';
+          import 'package:flutter/material.dart';
+          import 'package:flutter/services.dart';
+          import '../services/data_service.dart';
+          import '../services/zego_config.dart';
+          import 'package:zego_uikit_prebuilt_live_audio_room/zego_uikit_prebuilt_live_audio_room.dart';
+          import 'package:zego_uikit_prebuilt_live_streaming/zego_uikit_prebuilt_live_streaming.dart';
+          import 'package:zego_uikit_signaling_plugin/zego_uikit_signaling_plugin.dart';
+
+          class ZegoLiveHubScreen extends StatelessWidget {
+            const ZegoLiveHubScreen({super.key, required this.mediaMode});
+            final String mediaMode; // audio, video ou live
+
+            String get _title => mediaMode == 'audio'
+                ? 'Salas de Voz'
+                : mediaMode == 'video' ? 'Salas de Vídeo' : 'Lives LoveMix';
+
+            @override
+            Widget build(BuildContext context) {
+              return Scaffold(
+                backgroundColor: const Color(0xFF080510),
+                appBar: AppBar(
+                  title: Text(_title),
+                  actions: [
+                    IconButton(
+                      tooltip: 'Entrar com código',
+                      icon: const Icon(Icons.key_rounded),
+                      onPressed: () => _joinByCode(context),
+                    ),
+                  ],
+                ),
+                floatingActionButton: FloatingActionButton.extended(
+                  backgroundColor: const Color(0xFFFF2DAB),
+                  foregroundColor: Colors.white,
+                  icon: const Icon(Icons.add),
+                  label: Text(mediaMode == 'audio' ? 'Criar sala' : 'Começar transmissão'),
+                  onPressed: () => _create(context),
+                ),
+                body: Column(children: [
+                  Container(
+                    margin: const EdgeInsets.all(16),
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                        colors: [Color(0xFF35104F), Color(0xFF170D25)],
+                      ),
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(color: const Color(0xFF9B35FF)),
+                    ),
+                    child: Row(children: [
+                      Icon(mediaMode == 'audio' ? Icons.mic : Icons.live_tv,
+                          color: const Color(0xFFFF55D0), size: 34),
+                      const SizedBox(width: 12),
+                      Expanded(child: Text(
+                        mediaMode == 'audio'
+                            ? 'Entre no palco, peça para falar e converse ao vivo.'
+                            : 'Crie uma transmissão ou entre em uma live da comunidade.',
+                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                      )),
+                    ]),
+                  ),
+                  Expanded(
+                    child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                      stream: DataService.instance.publicLiveRooms(mediaMode: mediaMode),
+                      builder: (context, snap) {
+                        if (snap.hasError) {
+                          return const Center(child: Text('Erro ao carregar transmissões. Confira as regras e índices do Firestore.'));
+                        }
+                        if (!snap.hasData) {
+                          return const Center(child: CircularProgressIndicator(color: Color(0xFFFF2DAB)));
+                        }
+                        final docs = snap.data!.docs;
+                        if (docs.isEmpty) {
+                          return Center(child: Padding(
+                            padding: const EdgeInsets.all(28),
+                            child: Column(mainAxisSize: MainAxisSize.min, children: [
+                              const Icon(Icons.sensors, size: 54, color: Color(0xFFB65BDB)),
+                              const SizedBox(height: 12),
+                              const Text('Nenhuma transmissão agora',
+                                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17)),
+                              const SizedBox(height: 6),
+                              const Text('Seja a primeira pessoa a criar uma sala!',
+                                textAlign: TextAlign.center, style: TextStyle(color: Colors.white60)),
+                            ]),
+                          ));
+                        }
+                        return ListView.builder(
+                          padding: const EdgeInsets.fromLTRB(14, 4, 14, 100),
+                          itemCount: docs.length,
+                          itemBuilder: (context, index) {
+                            final doc = docs[index];
+                            final data = doc.data();
+                            final members = List<String>.from(data['members'] ?? []);
+                            return Card(
+                              color: const Color(0xFF1A1028),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(16),
+                                side: const BorderSide(color: Color(0xFF71349B)),
+                              ),
+                              child: ListTile(
+                                contentPadding: const EdgeInsets.all(12),
+                                leading: CircleAvatar(
+                                  backgroundColor: const Color(0xFF7027A5),
+                                  child: Icon(mediaMode == 'audio' ? Icons.mic : Icons.videocam,
+                                    color: Colors.white),
+                                ),
+                                title: Text((data['name'] ?? 'Sala LoveMix').toString(),
+                                  style: const TextStyle(fontWeight: FontWeight.bold)),
+                                subtitle: Text('${members.length} participantes • AO VIVO',
+                                  style: const TextStyle(color: Colors.white60)),
+                                trailing: const Icon(Icons.play_circle_fill,
+                                  color: Color(0xFFFF45C4), size: 30),
+                                onTap: () async {
+                                  try {
+                                    if (!members.contains(DataService.instance.uid)) {
+                                      await DataService.instance.joinRoom(doc.id);
+                                    }
+                                    if (!context.mounted) return;
+                                    Navigator.push(context, MaterialPageRoute(
+                                      builder: (_) => ZegoMediaSessionScreen(
+                                        roomId: doc.id,
+                                        roomName: (data['name'] ?? 'Sala LoveMix').toString(),
+                                        mediaMode: mediaMode,
+                                        isHost: data['ownerId'] == DataService.instance.uid,
+                                      ),
+                                    ));
+                                  } catch (e) {
+                                    if (context.mounted) {
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        SnackBar(content: Text('Não foi possível entrar: $e')));
+                                    }
+                                  }
+                                },
+                              ),
+                            );
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                ]),
+              );
+            }
+
+            Future<void> _joinByCode(BuildContext context) async {
+              final controller = TextEditingController();
+              final code = await showDialog<String>(
+                context: context,
+                builder: (ctx) => AlertDialog(
+                  backgroundColor: const Color(0xFF21132F),
+                  title: const Text('Entrar com código'),
+                  content: TextField(
+                    controller: controller,
+                    decoration: const InputDecoration(labelText: 'Código da sala'),
+                  ),
+                  actions: [
+                    TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancelar')),
+                    ElevatedButton(
+                      onPressed: () {
+                        final value = controller.text.trim();
+                        if (value.isNotEmpty) Navigator.pop(ctx, value);
+                      },
+                      child: const Text('Entrar'),
+                    ),
+                  ],
+                ),
+              );
+              controller.dispose();
+              if (code == null || !context.mounted) return;
+              try {
+                final room = await FirebaseFirestore.instance.collection('rooms').doc(code).get();
+                final data = room.data();
+                if (!room.exists || data == null || data['isLive'] != true ||
+                    data['mediaMode'] != mediaMode) {
+                  throw Exception('Código inválido ou transmissão encerrada.');
+                }
+                final members = List<String>.from(data['members'] ?? []);
+                if (!members.contains(DataService.instance.uid)) {
+                  await DataService.instance.joinRoom(code);
+                }
+                if (!context.mounted) return;
+                Navigator.push(context, MaterialPageRoute(
+                  builder: (_) => ZegoMediaSessionScreen(
+                    roomId: code,
+                    roomName: (data['name'] ?? 'Sala LoveMix').toString(),
+                    mediaMode: mediaMode,
+                    isHost: data['ownerId'] == DataService.instance.uid,
+                  ),
+                ));
+              } catch (e) {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))));
+                }
+              }
+            }
+
+            Future<void> _create(BuildContext context) async {
+              final controller = TextEditingController();
+              final name = await showDialog<String>(
+                context: context,
+                builder: (ctx) => AlertDialog(
+                  backgroundColor: const Color(0xFF21132F),
+                  title: Text(mediaMode == 'audio' ? 'Criar sala de voz' : 'Criar transmissão'),
+                  content: TextField(
+                    controller: controller,
+                    maxLength: 40,
+                    decoration: const InputDecoration(labelText: 'Nome da sala'),
+                  ),
+                  actions: [
+                    TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancelar')),
+                    ElevatedButton(
+                      onPressed: () {
+                        final value = controller.text.trim();
+                        if (value.length >= 3) Navigator.pop(ctx, value);
+                      },
+                      child: const Text('Criar'),
+                    ),
+                  ],
+                ),
+              );
+              controller.dispose();
+              if (name == null || !context.mounted) return;
+              try {
+                final id = await DataService.instance.createRoom(
+                  name,
+                  category: mediaMode == 'audio' ? 'Salas de Voz' : 'Lives',
+                  description: 'Transmissão ao vivo do LoveMix',
+                  isLive: true,
+                  mediaMode: mediaMode,
+                );
+                if (!context.mounted) return;
+                await showDialog<void>(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    backgroundColor: const Color(0xFF21132F),
+                    title: const Text('Sua sala está pronta!'),
+                    content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      const Text('Compartilhe este código para seus amigos entrarem:'),
+                      const SizedBox(height: 12),
+                      SelectableText(id, style: const TextStyle(
+                        color: Color(0xFFFF70D0), fontWeight: FontWeight.bold, fontSize: 18)),
+                      TextButton.icon(
+                        onPressed: () {
+                          Clipboard.setData(ClipboardData(text: id));
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Código copiado!')));
+                        },
+                        icon: const Icon(Icons.copy), label: const Text('Copiar código'),
+                      ),
+                    ]),
+                    actions: [ElevatedButton(
+                      onPressed: () => Navigator.pop(ctx), child: const Text('Continuar'))],
+                  ),
+                );
+                if (!context.mounted) return;
+                Navigator.push(context, MaterialPageRoute(
+                  builder: (_) => ZegoMediaSessionScreen(
+                    roomId: id, roomName: name, mediaMode: mediaMode, isHost: true,
+                  ),
+                ));
+              } catch (e) {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Erro ao criar sala: $e')));
+                }
+              }
+            }
+          }
+
+          class ZegoMediaSessionScreen extends StatelessWidget {
+            const ZegoMediaSessionScreen({
+              super.key,
+              required this.roomId,
+              required this.roomName,
+              required this.mediaMode,
+              required this.isHost,
+            });
+
+            final String roomId;
+            final String roomName;
+            final String mediaMode;
+            final bool isHost;
+
+            String get _safeUserId {
+              final raw = FirebaseAuth.instance.currentUser?.uid ?? 'guest';
+              return raw.replaceAll(RegExp(r'[^a-zA-Z0-9_]'), '_');
+            }
+
+            String get _safeUserName {
+              final user = FirebaseAuth.instance.currentUser;
+              final raw = (user?.displayName?.trim().isNotEmpty == true)
+                  ? user!.displayName!.trim()
+                  : (user?.email?.split('@').first ?? 'LoveMix');
+              final sanitized = raw.replaceAll(RegExp(r'[^a-zA-Z0-9_]'), '_');
+              return sanitized.length > 32 ? sanitized.substring(0, 32) : sanitized;
+            }
+
+            @override
+            Widget build(BuildContext context) {
+              final media = mediaMode == 'audio'
+                  ? SafeArea(child: ZegoUIKitPrebuiltLiveAudioRoom(
+                      appID: ZegoConfig.appId,
+                      appSign: ZegoConfig.appSign,
+                      userID: _safeUserId,
+                      userName: _safeUserName,
+                      roomID: roomId,
+                      config: (isHost
+                          ? ZegoUIKitPrebuiltLiveAudioRoomConfig.host()
+                          : ZegoUIKitPrebuiltLiveAudioRoomConfig.audience())
+                        ..turnOnMicrophoneWhenJoining = false
+                        ..topMenuBar.buttons = [
+                          ZegoLiveAudioRoomMenuBarButtonName.minimizingButton,
+                        ]
+                        ..bottomMenuBar.showInRoomMessageButton = true
+                        ..bottomMenuBar.maxCount = 5
+                        ..bottomMenuBar.hostButtons = [
+                          ZegoLiveAudioRoomMenuBarButtonName.toggleMicrophoneButton,
+                          ZegoLiveAudioRoomMenuBarButtonName.showMemberListButton,
+                          ZegoLiveAudioRoomMenuBarButtonName.closeSeatButton,
+                        ]
+                        ..bottomMenuBar.speakerButtons = [
+                          ZegoLiveAudioRoomMenuBarButtonName.toggleMicrophoneButton,
+                          ZegoLiveAudioRoomMenuBarButtonName.showMemberListButton,
+                        ]
+                        ..bottomMenuBar.audienceButtons = [
+                          ZegoLiveAudioRoomMenuBarButtonName.applyToTakeSeatButton,
+                          ZegoLiveAudioRoomMenuBarButtonName.showMemberListButton,
+                        ]
+                        ..bottomMenuBar.hostExtendButtons = [
+                          StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+                            stream: FirebaseFirestore.instance
+                                .collection('rooms').doc(roomId).snapshots(),
+                            builder: (context, snapshot) {
+                              final locked = snapshot.data?.data()?['isLocked'] == true;
+                              return SizedBox(
+                                width: 42,
+                                height: 42,
+                                child: ElevatedButton(
+                                  style: ElevatedButton.styleFrom(
+                                    padding: EdgeInsets.zero,
+                                    shape: const CircleBorder(),
+                                    backgroundColor: const Color(0xFF35104F),
+                                    foregroundColor: Colors.white,
+                                  ),
+                                  onPressed: snapshot.hasData ? () async {
+                                    try {
+                                      await FirebaseFirestore.instance
+                                          .collection('rooms').doc(roomId)
+                                          .update({'isLocked': !locked});
+                                    } catch (error) {
+                                      if (context.mounted) {
+                                        ScaffoldMessenger.of(context).showSnackBar(
+                                          SnackBar(content: Text('Não foi possível alterar o bloqueio: $error')),
+                                        );
+                                      }
+                                    }
+                                  } : null,
+                                  child: Icon(locked ? Icons.lock_open : Icons.lock),
+                                ),
+                              );
+                            },
+                          ),
+                        ],
+                    ))
+                  : SafeArea(child: ZegoUIKitPrebuiltLiveStreaming(
+                      appID: ZegoConfig.appId,
+                      appSign: ZegoConfig.appSign,
+                      userID: _safeUserId,
+                      userName: _safeUserName,
+                      liveID: roomId,
+                      config: isHost
+                          ? ZegoUIKitPrebuiltLiveStreamingConfig.host(
+                              plugins: [ZegoUIKitSignalingPlugin()],
+                            )
+                          : ZegoUIKitPrebuiltLiveStreamingConfig.audience(
+                              plugins: [ZegoUIKitSignalingPlugin()],
+                            ),
+                    ));
+
+              return Scaffold(
+                backgroundColor: const Color(0xFF080510),
+                body: Stack(children: [
+                  Positioned.fill(child: media),
+                  Positioned(
+                    left: 14,
+                    top: MediaQuery.of(context).padding.top + 56,
+                    child: IgnorePointer(
+                      child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                        stream: DataService.instance.roomMessages(roomId)
+                            .where('type', isEqualTo: 'gift')
+                            .orderBy('createdAt', descending: true)
+                            .limit(1)
+                            .snapshots(),
+                        builder: (context, snap) {
+                          if (!snap.hasData || snap.data!.docs.isEmpty) {
+                            return const SizedBox.shrink();
+                          }
+                          final gift = snap.data!.docs.first.data();
+                          final emoji = (gift['emoji'] ?? '🎁').toString();
+                          final name = (gift['giftName'] ?? 'Presente').toString();
+                          return Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 9),
+                            decoration: BoxDecoration(
+                              color: const Color(0xDD28113D),
+                              borderRadius: BorderRadius.circular(24),
+                              border: Border.all(color: const Color(0xFFFFD76A)),
+                            ),
+                            child: Text('$emoji $name enviado!',
+                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    top: MediaQuery.of(context).padding.top + 8,
+                    right: 12,
+                    child: Material(
+                      color: Colors.black54,
+                      shape: const CircleBorder(),
+                      child: IconButton(
+                        tooltip: 'Sair da transmissão',
+                        icon: const Icon(Icons.close, color: Colors.white),
+                        onPressed: () async {
+                          if (isHost) {
+                            try { await DataService.instance.endLiveRoom(roomId); } catch (_) {}
+                          }
+                          if (context.mounted) Navigator.pop(context);
+                        },
+                      ),
+                    ),
+                  ),
+                  if (!isHost)
+                    Positioned(
+                      right: 14,
+                      bottom: MediaQuery.of(context).padding.bottom + 110,
+                      child: _GiftButton(roomId: roomId),
+                    ),
+                  if (mediaMode == 'audio')
+                    Positioned(
+                      left: 14,
+                      bottom: MediaQuery.of(context).padding.bottom + 110,
+                      child: _RoomInteractionButton(roomId: roomId),
+                    ),
+                  if (mediaMode == 'audio')
+                    Positioned(
+                      left: 0, right: 0,
+                      top: MediaQuery.of(context).padding.top + 105,
+                      child: _RoomInteractionOverlay(roomId: roomId),
+                    ),
+                ]),
+              );
+            }
+          }
+
+
+          class _RoomInteractionButton extends StatelessWidget {
+            const _RoomInteractionButton({required this.roomId});
+            final String roomId;
+
+            static const actions = <Map<String, String>>[
+              {'id':'hug','emoji':'🫂','name':'Abraço'},
+              {'id':'kiss','emoji':'💋','name':'Beijinho'},
+              {'id':'love','emoji':'💕','name':'Coração apaixonado'},
+              {'id':'dance','emoji':'💃','name':'Dançar juntos'},
+              {'id':'laugh','emoji':'😂','name':'Brincadeira'},
+              {'id':'highfive','emoji':'🙌','name':'Toca aqui'},
+              {'id':'fight','emoji':'🥊','name':'Lutinha divertida'},
+              {'id':'party','emoji':'🎉','name':'Comemorar'},
+            ];
+
+            @override
+            Widget build(BuildContext context) => FloatingActionButton.extended(
+              heroTag: 'zego-room-interactions',
+              backgroundColor: const Color(0xFF7027A5),
+              foregroundColor: Colors.white,
+              icon: const Icon(Icons.emoji_emotions),
+              label: const Text('Interações'),
+              onPressed: () async {
+                final roomSnap = await FirebaseFirestore.instance.collection('rooms').doc(roomId).get();
+                if (!context.mounted) return;
+                final members = List<String>.from(roomSnap.data()?['members'] ?? [])
+                    .where((id) => id != DataService.instance.uid).toList();
+                if (members.isEmpty) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Espere outra pessoa entrar na sala para interagir.')));
+                  return;
+                }
+                String target = members.first;
+                Map<String, String> action = actions.first;
+                await showModalBottomSheet<void>(
+                  context: context, backgroundColor: const Color(0xFF1A1028),
+                  isScrollControlled: true, shape: const RoundedRectangleBorder(
+                    borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+                  builder: (sheetContext) => StatefulBuilder(builder: (ctx, setSheet) =>
+                    Padding(padding: EdgeInsets.fromLTRB(18, 18, 18, 22 + MediaQuery.of(ctx).viewInsets.bottom),
+                      child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        const Center(child: Text('Interações da sala', style: TextStyle(color: Colors.white, fontSize: 19, fontWeight: FontWeight.bold))),
+                        const SizedBox(height: 14),
+                        const Text('Escolha com quem interagir', style: TextStyle(color: Colors.white70)),
+                        const SizedBox(height: 6),
+                        DropdownButtonFormField<String>(
+                          value: target, dropdownColor: const Color(0xFF29143D),
+                          decoration: const InputDecoration(labelText: 'Participante'),
+                          items: members.map((id) => DropdownMenuItem(value: id, child: Text(id == DataService.instance.uid ? 'Você' : 'Participante ${id.substring(0, id.length > 6 ? 6 : id.length)}'))).toList(),
+                          onChanged: (v) { if (v != null) setSheet(() => target = v); },
+                        ),
+                        const SizedBox(height: 14),
+                        const Text('Escolha a interação', style: TextStyle(color: Colors.white70)),
+                        const SizedBox(height: 8),
+                        GridView.builder(shrinkWrap: true, physics: const NeverScrollableScrollPhysics(),
+                          itemCount: actions.length, gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 4, mainAxisSpacing: 8, crossAxisSpacing: 8, childAspectRatio: .92),
+                          itemBuilder: (_, i) { final item = actions[i]; final selected = action['id'] == item['id']; return InkWell(
+                            onTap: () => setSheet(() => action = item),
+                            borderRadius: BorderRadius.circular(14),
+                            child: Container(decoration: BoxDecoration(color: selected ? const Color(0xFF63258D) : const Color(0xFF2A1A3A), borderRadius: BorderRadius.circular(14), border: Border.all(color: selected ? const Color(0xFFFF55D0) : Colors.white12)),
+                              child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [Text(item['emoji']!, style: const TextStyle(fontSize: 27)), const SizedBox(height: 3), Text(item['name']!, textAlign: TextAlign.center, maxLines: 2, style: const TextStyle(color: Colors.white, fontSize: 10))])));
+                          },
+                        ),
+                        const SizedBox(height: 14),
+                        SizedBox(width: double.infinity, child: ElevatedButton.icon(
+                          style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFFF2DAB), foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(vertical: 13)),
+                          icon: const Icon(Icons.auto_awesome), label: const Text('Enviar interação'),
+                          onPressed: () async {
+                            try {
+                              final uid = DataService.instance.uid;
+                              await DataService.instance.roomMessages(roomId).add({
+                                'senderId': uid, 'targetUid': target, 'type': 'interaction',
+                                'text': '${action['emoji']} ${action['name']}',
+                                'interactionId': action['id'], 'emoji': action['emoji'],
+                                'label': action['name'], 'createdAt': FieldValue.serverTimestamp(),
+                              });
+                              if (sheetContext.mounted) Navigator.pop(sheetContext);
+                            } catch (e) {
+                              if (sheetContext.mounted) ScaffoldMessenger.of(sheetContext).showSnackBar(SnackBar(content: Text('Não foi possível enviar: $e')));
+                            }
+                          },
+                        )),
+                      ]),
+                    ),
+                  ),
+                );
+              },
+            );
+          }
+
+          class _RoomInteractionOverlay extends StatelessWidget {
+            const _RoomInteractionOverlay({required this.roomId});
+            final String roomId;
+
+            @override
+            Widget build(BuildContext context) => IgnorePointer(
+              child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                stream: DataService.instance.roomMessages(roomId).orderBy('createdAt', descending: true).limit(20).snapshots(),
+                builder: (context, snap) {
+                  if (!snap.hasData) return const SizedBox.shrink();
+                  final items = snap.data!.docs.where((d) => d.data()['type'] == 'interaction').toList();
+                  if (items.isEmpty) return const SizedBox.shrink();
+                  final data = items.first.data();
+                  final emoji = (data['emoji'] ?? '💕').toString();
+                  final label = (data['label'] ?? 'Interação').toString();
+                  final sender = (data['senderId'] ?? '').toString();
+                  final target = (data['targetUid'] ?? '').toString();
+                  return Center(child: TweenAnimationBuilder<double>(
+                    key: ValueKey(items.first.id), tween: Tween(begin: .55, end: 1), duration: const Duration(milliseconds: 650),
+                    builder: (context, scale, child) => Transform.scale(scale: scale, child: child),
+                    child: Container(margin: const EdgeInsets.symmetric(horizontal: 34), padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 13),
+                      decoration: BoxDecoration(color: const Color(0xEE21102F), borderRadius: BorderRadius.circular(22), border: Border.all(color: const Color(0xFFFF55D0), width: 1.5), boxShadow: const [BoxShadow(color: Color(0x887D2BBA), blurRadius: 22)]),
+                      child: Column(mainAxisSize: MainAxisSize.min, children: [
+                        Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                          const CircleAvatar(radius: 23, backgroundColor: Color(0xFF6D2998), child: Icon(Icons.person, color: Colors.white)),
+                          const SizedBox(width: 8), Text(emoji, style: const TextStyle(fontSize: 36)),
+                          const SizedBox(width: 8), const CircleAvatar(radius: 23, backgroundColor: Color(0xFFB82D87), child: Icon(Icons.person, color: Colors.white)),
+                        ]),
+                        const SizedBox(height: 5), Text(label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                        Text('Participante ${sender.substring(0, sender.length > 5 ? 5 : sender.length)} + ${target.substring(0, target.length > 5 ? 5 : target.length)}', style: const TextStyle(color: Colors.white60, fontSize: 10)),
+                      ]),
+                    ),
+                  ));
+                },
+              ),
+            );
+          }
+
+          class _GiftButton extends StatelessWidget {
+            const _GiftButton({required this.roomId});
+            final String roomId;
+
+            static const gifts = <Map<String, dynamic>>[
+              {'id': 'rose', 'emoji': '🌹', 'name': 'Rosa', 'currency': 'coins', 'cost': 50},
+              {'id': 'gift', 'emoji': '🎁', 'name': 'Presente', 'currency': 'coins', 'cost': 100},
+              {'id': 'heart', 'emoji': '💗', 'name': 'Coração', 'currency': 'coins', 'cost': 200},
+              {'id': 'crown', 'emoji': '👑', 'name': 'Coroa', 'currency': 'diamonds', 'cost': 50},
+              {'id': 'diamond', 'emoji': '💎', 'name': 'Diamante', 'currency': 'diamonds', 'cost': 100},
+              {'id': 'lamborghini', 'emoji': '🏎️', 'name': 'Lamborghini', 'currency': 'diamonds', 'cost': 5000},
+              {'id': 'iphone18', 'emoji': '📱', 'name': 'iPhone 18', 'currency': 'coins', 'cost': 13000},
+            ];
+
+            @override
+            Widget build(BuildContext context) => FloatingActionButton.extended(
+              heroTag: 'zego-live-gifts',
+              backgroundColor: const Color(0xFFFF2DAB),
+              icon: const Icon(Icons.card_giftcard, color: Colors.white),
+              label: const Text('Presentes', style: TextStyle(color: Colors.white)),
+              onPressed: () async {
+                try {
+                  final room = await FirebaseFirestore.instance.collection('rooms').doc(roomId).get();
+                  final data = room.data() ?? {};
+                  final recipient = (data['ownerId'] ?? '').toString();
+                  if (recipient.isEmpty || recipient == DataService.instance.uid) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Os presentes são enviados para o anfitrião da sala.')));
+                    return;
+                  }
+
+                  Map<String, dynamic>? selected;
+                  Map<String, dynamic> chosenGift = gifts.first;
+                  selected = await showModalBottomSheet<Map<String, dynamic>>(
+                    context: context,
+                    isScrollControlled: true,
+                    backgroundColor: Colors.transparent,
+                    builder: (ctx) => SafeArea(
+                      child: Container(
+                        height: MediaQuery.of(ctx).size.height * .76,
+                        decoration: const BoxDecoration(
+                          color: Color(0xFF160D22),
+                          borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+                          border: Border(top: BorderSide(color: Color(0xFFFF4FCB), width: 1.5)),
+                        ),
+                        child: StatefulBuilder(builder: (ctx, setSheet) {
+                          return StreamBuilder(
+                            stream: DataService.instance.myProfile(),
+                            builder: (ctx, profileSnap) {
+                              final profile = profileSnap.data?.data() ?? <String, dynamic>{};
+                              final coins = (profile['coins'] as num?)?.toInt() ?? 0;
+                              final diamonds = (profile['diamonds'] as num?)?.toInt() ?? 0;
+                              final balance = chosenGift['currency'] == 'coins' ? coins : diamonds;
+                              final canAfford = balance >= (chosenGift['cost'] as int);
+                              return Column(children: [
+                                  const SizedBox(height: 12),
+                                  Container(width: 42, height: 4, decoration: BoxDecoration(
+                                    color: Colors.white30, borderRadius: BorderRadius.circular(8))),
+                                  const SizedBox(height: 16),
+                                  const Text('LOVEMIX PRESENTES', style: TextStyle(
+                                    color: Color(0xFFFF65D5), fontSize: 19, fontWeight: FontWeight.w900,
+                                    letterSpacing: 1.2)),
+                                  const SizedBox(height: 5),
+                                  const Text('Escolha um presente para enviar ao anfitrião',
+                                    style: TextStyle(color: Colors.white70, fontSize: 12)),
+                                  const SizedBox(height: 14),
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                                    child: Row(children: [
+                                      Expanded(child: _balancePill('🪙', '$coins moedas')),
+                                      const SizedBox(width: 8),
+                                      Expanded(child: _balancePill('💎', '$diamonds diamantes')),
+                                    ]),
+                                  ),
+                                  const SizedBox(height: 14),
+                                  Expanded(child: GridView.builder(
+                                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                                    itemCount: gifts.length,
+                                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                                      crossAxisCount: 3, mainAxisSpacing: 10, crossAxisSpacing: 10,
+                                      childAspectRatio: .92),
+                                    itemBuilder: (ctx, index) {
+                                      final gift = gifts[index];
+                                      final isSelected = chosenGift['id'] == gift['id'];
+                                      return InkWell(
+                                        borderRadius: BorderRadius.circular(18),
+                                        onTap: () => setSheet(() => chosenGift = gift),
+                                        child: AnimatedContainer(
+                                          duration: const Duration(milliseconds: 160),
+                                          decoration: BoxDecoration(
+                                            color: isSelected ? const Color(0xFF4A1B60) : const Color(0xFF261633),
+                                            borderRadius: BorderRadius.circular(18),
+                                            border: Border.all(
+                                              color: isSelected ? const Color(0xFFFF55C9) : const Color(0xFF58356A),
+                                              width: isSelected ? 2 : 1),
+                                            boxShadow: isSelected ? const [BoxShadow(
+                                              color: Color(0x66FF36C7), blurRadius: 14)] : null,
+                                          ),
+                                          child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                                            Text(gift['emoji'] as String, style: const TextStyle(fontSize: 35)),
+                                            const SizedBox(height: 5),
+                                            Text(gift['name'] as String, maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
+                                            const SizedBox(height: 4),
+                                            Text('${gift['cost']} ${gift['currency'] == 'coins' ? '🪙' : '💎'}',
+                                              style: const TextStyle(color: Color(0xFFFFD66B), fontSize: 11, fontWeight: FontWeight.w800)),
+                                          ]),
+                                        ),
+                                      );
+                                    },
+                                  )),
+                                  Padding(
+                                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                                    child: SizedBox(width: double.infinity, height: 50,
+                                      child: ElevatedButton(
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: canAfford ? const Color(0xFFFF2DAB) : Colors.white24,
+                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))),
+                                        onPressed: canAfford ? () => Navigator.pop(ctx, chosenGift) : null,
+                                        child: Text(canAfford
+                                          ? 'Enviar ${chosenGift['emoji']} ${chosenGift['name']}'
+                                          : 'Saldo insuficiente',
+                                          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900)),
+                                      ),
+                                    ),
+                                  ),
+                              ]);
+                            },
+                          );
+                        }),
+                      ),
+                    ),
+                  );
+                  if (selected == null) return;
+
+                  await DataService.instance.sendRoomGift(
+                    roomId, recipient, selected['id'] as String,
+                    selected['emoji'] as String, selected['name'] as String);
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('${selected['emoji']} ${selected['name']} enviado ao anfitrião!')));
+                  }
+                } catch (e) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))));
+                  }
+                }
+              },
+            );
+
+            Widget _balancePill(String emoji, String value) => Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+              decoration: BoxDecoration(color: const Color(0xFF2B1A39),
+                borderRadius: BorderRadius.circular(12), border: Border.all(color: const Color(0xFF67417A))),
+              child: Text('$emoji  $value', textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold)),
+            );
+          }
+          LOVEMIX_ZEGO
+
+          cat > /tmp/novo_notification_service.dart <<'LOVEMIX_NOTIF'
+          import 'dart:async';
+          import 'dart:convert';
+
+          import 'package:cloud_firestore/cloud_firestore.dart';
+          import 'package:firebase_auth/firebase_auth.dart';
+          import 'package:firebase_messaging/firebase_messaging.dart';
+          import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+
+          /// Recebe notificações push e também mostra notificações enquanto o app está aberto.
+          class NotificationService {
+            NotificationService._();
+            static final instance = NotificationService._();
+
+            final FirebaseMessaging _messaging = FirebaseMessaging.instance;
+            final FlutterLocalNotificationsPlugin _local =
+                FlutterLocalNotificationsPlugin();
+            bool _initialized = false;
+            String? _registeredUid;
+            StreamSubscription<String>? _tokenRefreshSubscription;
+
+            static const AndroidNotificationChannel _channel = AndroidNotificationChannel(
+              'lovemix_updates',
+              'LoveMix',
+              description: 'Notificações de mensagens e curtidas do LoveMix',
+              importance: Importance.high,
+            );
+
+            Future<void> initializeForUser(User user) async {
+              if (!_initialized) {
+                const android = AndroidInitializationSettings('@mipmap/ic_launcher');
+                const settings = InitializationSettings(android: android);
+                await _local.initialize(settings: settings);
+                await _local
+                    .resolvePlatformSpecificImplementation<
+                        AndroidFlutterLocalNotificationsPlugin>()
+                    ?.createNotificationChannel(_channel);
+
+                FirebaseMessaging.onMessage.listen(_showForegroundNotification);
+                FirebaseMessaging.onMessageOpenedApp.listen(_handleNotificationTap);
+                _initialized = true;
+              }
+
+              final permission = await _messaging.requestPermission(
+                alert: true,
+                badge: true,
+                sound: true,
+              );
+              if (permission.authorizationStatus == AuthorizationStatus.denied) return;
+
+              if (_registeredUid == user.uid) return;
+              _registeredUid = user.uid;
+              await _saveToken(user.uid);
+              await _tokenRefreshSubscription?.cancel();
+              _tokenRefreshSubscription = _messaging.onTokenRefresh.listen((token) async {
+                final current = FirebaseAuth.instance.currentUser;
+                if (current != null && current.uid == user.uid) {
+                  await _saveToken(user.uid, token: token);
+                }
+              });
+            }
+
+            Future<void> _saveToken(String uid, {String? token}) async {
+              final value = token ?? await _messaging.getToken();
+              if (value == null || value.isEmpty) return;
+              await FirebaseFirestore.instance
+                  .collection('users')
+                  .doc(uid)
+                  .collection('fcmTokens')
+                  .doc(value)
+                  .set({
+                'token': value,
+                'updatedAt': FieldValue.serverTimestamp(),
+                'platform': 'android',
+              });
+            }
+
+            Future<void> _showForegroundNotification(RemoteMessage message) async {
+              final notification = message.notification;
+              final title = notification?.title ?? message.data['title']?.toString() ?? 'LoveMix';
+              final body = notification?.body ?? message.data['body']?.toString() ?? 'Você tem uma novidade.';
+              await _local.show(
+                id: message.hashCode,
+                title: title,
+                body: body,
+                notificationDetails: NotificationDetails(
+                  android: AndroidNotificationDetails(
+                    _channel.id,
+                    _channel.name,
+                    channelDescription: _channel.description,
+                    importance: Importance.high,
+                    priority: Priority.high,
+                    icon: '@mipmap/ic_launcher',
+                  ),
+                ),
+                payload: jsonEncode(message.data),
+              );
+            }
+
+            void _handleNotificationTap(RemoteMessage message) {
+              // A tela de destino pode ser aberta aqui quando a navegação global do app
+              // estiver configurada. Por enquanto, tocar na notificação abre o LoveMix.
+            }
+          }
+          LOVEMIX_NOTIF
+
           python3 - <<'PYCODE'
           from pathlib import Path
+          import shutil
 
-          def edit(path, pairs):
-              f = Path(path)
-              if not f.exists():
-                  print(f"Pulando (não existe): {path}")
+          def aplicar(destino, novo, marcas_com_erro):
+              d = Path(destino)
+              if not d.exists() or d.stat().st_size == 0:
+                  shutil.copyfile(novo, d)
+                  print(f"Criado a partir do código corrigido: {destino}")
                   return
-              t = f.read_text()
-              changed = False
-              for old, new in pairs:
-                  if old in t:
-                      t = t.replace(old, new)
-                      changed = True
-              if changed:
-                  f.write_text(t)
-                  print(f"Corrigido: {path}")
+              t = d.read_text()
+              if any(m in t for m in marcas_com_erro):
+                  shutil.copyfile(novo, d)
+                  print(f"Substituído pelo código corrigido: {destino}")
               else:
-                  print(f"Já estava correto: {path}")
+                  print(f"Já estava correto, mantido: {destino}")
 
-          # 1) Parêntese sobrando no GridView.builder da tela de interações.
-          edit("lib/screens/zego_live_screen.dart", [(
-              "                }),\n              ),\n              const SizedBox(height: 14),\n"
-              "              SizedBox(width: double.infinity, child: ElevatedButton.icon(",
-              "                },\n              ),\n              const SizedBox(height: 14),\n"
-              "              SizedBox(width: double.infinity, child: ElevatedButton.icon(",
-          )])
+          # zego_live_screen: parêntese sobrando no GridView.builder
+          aplicar(
+              "lib/screens/zego_live_screen.dart",
+              "/tmp/novo_zego_live_screen.dart",
+              ["                }),\n              ),\n              const SizedBox(height: 14),\n"
+               "              SizedBox(width: double.infinity, child: ElevatedButton.icon("],
+          )
 
-          # 2) flutter_local_notifications 20+: initialize/show usam parâmetros nomeados.
-          edit("lib/services/notification_service.dart", [
-              ("await _local.initialize(settings);", "await _local.initialize(settings: settings);"),
-              ("await _local.show(\n      message.hashCode,\n      title,\n      body,\n      NotificationDetails(",
-               "await _local.show(\n      id: message.hashCode,\n      title: title,\n      body: body,\n      notificationDetails: NotificationDetails("),
-          ])
+          # notification_service: flutter_local_notifications 20+ usa parâmetros nomeados
+          aplicar(
+              "lib/services/notification_service.dart",
+              "/tmp/novo_notification_service.dart",
+              ["await _local.initialize(settings);",
+               "await _local.show(\n      message.hashCode,"],
+          )
           PYCODE
 
       - name: Instalar Java 17
@@ -522,6 +1377,27 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::notice title=SHA-1 (release)::$SHA1"
           echo "::notice title=SHA-256 (release)::$SHA256"
+
+      - name: Fixar permission_handler_android sem Android 17 (corrige ACCESS_LOCAL_NETWORK)
+        run: |
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import re
+
+          # permission_handler_android 14.x usa APIs do Android 17 (API 37), que o
+          # AGP 8.13 usado aqui não compila. A 13.0.1 compila com compileSdk 36.
+          f = Path("pubspec.yaml")
+          t = f.read_text()
+          if re.search(r"(?m)^\s+permission_handler_android\s*:", t):
+              print("permission_handler_android já está fixado no pubspec.yaml.")
+          elif re.search(r"(?m)^dependency_overrides\s*:", t):
+              t = re.sub(r"(?m)^dependency_overrides\s*:\s*$", "dependency_overrides:\n  permission_handler_android: 13.0.1", t, count=1)
+              f.write_text(t)
+              print("permission_handler_android fixado em 13.0.1 (seção existente).")
+          else:
+              f.write_text(t.rstrip("\n") + "\n\ndependency_overrides:\n  permission_handler_android: 13.0.1\n")
+              print("permission_handler_android fixado em 13.0.1.")
+          PYCODE
 
       - name: Instalar dependências
         run: flutter pub get
