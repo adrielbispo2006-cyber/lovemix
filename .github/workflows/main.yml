@@ -173,6 +173,12 @@ jobs:
             printf '%s' "$GOOGLE_SERVICES_JSON" > android/app/google-services.json
             echo "Usando GOOGLE_SERVICES_JSON do GitHub Secrets."
             has_web() { python3 -c "import json,sys; c=json.load(open(sys.argv[1])); sys.exit(0 if any(str(o.get('client_type'))=='3' for cl in c['client'] for o in cl.get('oauth_client',[])) else 1)" "$1" 2>/dev/null; }
+            if has_web android/app/google-services.json; then echo "Secret: tem cliente WEB (ok)."; else echo "Secret: SEM cliente WEB."; fi
+            if [ -f google-services.json ]; then
+              if has_web google-services.json; then echo "Repositório: google-services.json existe e tem cliente WEB."; else echo "Repositório: google-services.json existe, mas SEM cliente WEB (arquivo antigo)."; fi
+            else
+              echo "Repositório: google-services.json NÃO existe na raiz do projeto."
+            fi
             if ! has_web android/app/google-services.json && [ -f google-services.json ] && has_web google-services.json; then
               cp google-services.json android/app/google-services.json
               echo "::warning::O secret GOOGLE_SERVICES_JSON não tem cliente OAuth WEB (client_type 3). Usando o google-services.json do repositório. Atualize ou apague o secret."
