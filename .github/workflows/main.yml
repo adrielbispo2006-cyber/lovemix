@@ -12,6 +12,51 @@ jobs:
       - name: Baixar projeto
         uses: actions/checkout@v4
 
+      - name: Conferir arquivos do projeto no repositório
+        run: |
+          missing=0
+          while read -r f; do
+            [ -z "$f" ] && continue
+            if [ ! -s "$f" ]; then
+              echo "FALTANDO no repositório: $f"
+              missing=1
+            fi
+          done <<'LISTA'
+          pubspec.yaml
+          lib/main.dart
+          lib/app.dart
+          lib/firebase_options.dart
+          lib/screens/admin_screen.dart
+          lib/screens/alliance_wall_screen.dart
+          lib/screens/auth_screen.dart
+          lib/screens/chat_rooms_screen.dart
+          lib/screens/chat_screen.dart
+          lib/screens/discover_screen.dart
+          lib/screens/home_screen.dart
+          lib/screens/messages_screen.dart
+          lib/screens/post_interactions_screen.dart
+          lib/screens/profile_frames_screen.dart
+          lib/screens/profile_screen.dart
+          lib/screens/profile_view_screen.dart
+          lib/screens/ranking_screen.dart
+          lib/screens/resources_screen.dart
+          lib/screens/stories_widget.dart
+          lib/screens/wallet_screen.dart
+          lib/screens/zego_live_screen.dart
+          lib/services/data_service.dart
+          lib/services/notification_service.dart
+          lib/services/zego_config.dart
+          lib/widgets/profile_frame.dart
+          LISTA
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Faltam arquivos do projeto no GitHub (lista acima). Envie esses arquivos nas mesmas pastas do zip e rode de novo."
+            exit 1
+          fi
+          echo "Todos os arquivos de código estão no repositório."
+          for f in assets/icon/lovemix.png assets/lovemix_launcher.png assets/lovemix_couple.jpg; do
+            [ -s "$f" ] && echo "OK: $f" || echo "::warning::Imagem ausente: $f (o workflow tenta achar ou criar uma substituta)."
+          done
+
       - name: Instalar Java 17
         uses: actions/setup-java@v4
         with:
@@ -472,10 +517,69 @@ jobs:
           print("Correção dos plugins Zego concluída.")
           PYCODE
 
-      - name: Verificar ícone roxo e preto do LoveMix
+      - name: Preparar ícone roxo e preto do LoveMix
         run: |
-          test -s assets/icon/lovemix.png || { echo "ERRO: assets/icon/lovemix.png não encontrado."; exit 1; }
-          file assets/icon/lovemix.png
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import shutil, zlib, struct
+
+          icon = Path("assets/icon/lovemix.png")
+          launcher = Path("assets/lovemix_launcher.png")
+          couple = Path("assets/lovemix_couple.jpg")
+          for d in (icon.parent, launcher.parent):
+              d.mkdir(parents=True, exist_ok=True)
+
+          def first(paths):
+              for c in paths:
+                  q = Path(c)
+                  if q.exists() and q.stat().st_size > 0:
+                      return q
+              return None
+
+          def write_png(path, size, bg, fg):
+              # Coração roxo gerado em Python puro (só usado se a arte original não existir).
+              raw = bytearray()
+              for y in range(size):
+                  raw.append(0)
+                  ny = -((y / size - 0.5) * 2.6) + 0.15
+                  for x in range(size):
+                      nx = (x / size - 0.5) * 2.6
+                      v = (nx * nx + ny * ny - 1) ** 3 - nx * nx * ny ** 3
+                      raw += bytes(fg if v <= 0 else bg)
+              def chunk(t, d):
+                  c = struct.pack(">I", len(d)) + t + d
+                  return c + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+              png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
+              png += chunk(b"IDAT", zlib.compress(bytes(raw), 9)) + chunk(b"IEND", b"")
+              path.write_bytes(png)
+
+          src = first([icon, launcher, "lovemix.png", "lovemix_launcher.png",
+                       "icon/lovemix.png", "assets/lovemix.png", "assets/icon.png", "icon.png"])
+          if src is not None:
+              if not (icon.exists() and icon.stat().st_size > 0):
+                  shutil.copyfile(src, icon)
+              if not (launcher.exists() and launcher.stat().st_size > 0):
+                  shutil.copyfile(src, launcher)
+              print(f"Ícone original do LoveMix usado a partir de: {src}")
+          else:
+              write_png(icon, 512, (9, 0, 15, 255), (190, 60, 220, 255))
+              write_png(launcher, 512, (0, 0, 0, 0), (190, 60, 220, 255))
+              print("::warning::A arte do ícone (assets/icon/lovemix.png) NÃO está no repositório. "
+                    "Usei um coração roxo e preto provisório. Envie lovemix.png para ter o ícone original.")
+
+          if not (couple.exists() and couple.stat().st_size > 0):
+              alt = first(["lovemix_couple.jpg", "assets/lovemix_couple.png", "lovemix_couple.png"])
+              if alt is not None:
+                  shutil.copyfile(alt, couple)
+                  print(f"Imagem do casal copiada de: {alt}")
+              else:
+                  write_png(couple, 256, (9, 0, 15, 255), (150, 40, 190, 255))
+                  print("::warning::assets/lovemix_couple.jpg NÃO está no repositório. Usei uma imagem provisória na tela de login.")
+
+          for f in (icon, launcher, couple):
+              assert f.exists() and f.stat().st_size > 0, f
+          print("Ícone e imagens prontos.")
+          PYCODE
 
       - name: Gerar e validar ícones nativos do LoveMix
         run: |
