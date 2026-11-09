@@ -3,17 +3,11 @@ name: Gerar APK LoveMix
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
-    paths:
-      - '.github/workflows/**'
-      - '*.zip'
-      - 'assets/**'
+    branches: [ "main" ]
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Baixar projeto
         uses: actions/checkout@v4
@@ -24,398 +18,360 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Cache do Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper/dists
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', 'pubspec.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
       - name: Instalar Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
-      - name: Encontrar e verificar ZIP
-        shell: bash
-        run: |
-          set -e
-
-          ZIP=$(find . -maxdepth 1 -type f -iname '*.zip' | head -n 1)
-
-          if [ -z "$ZIP" ]; then
-            echo "ERRO: ZIP do LoveMix não encontrado!"
-            exit 1
-          fi
-
-          unzip -t "$ZIP"
-          echo "ZIP_PATH=$ZIP" >> "$GITHUB_ENV"
-
-      - name: Extrair projeto LoveMix
-        run: |
-          mkdir -p extraido
-          unzip -q "$ZIP_PATH" -d extraido
-
-      - name: Localizar projeto Flutter
-        run: |
-          set -e
-
-          PROJECT=$(find extraido -name pubspec.yaml -printf '%h\n' | head -n 1)
-
-          if [ -z "$PROJECT" ]; then
-            echo "ERRO: Projeto Flutter não encontrado!"
-            exit 1
-          fi
-
-          cp -a "$PROJECT"/. .
-          test -f pubspec.yaml
-
-      - name: Verificar ícone LoveMix
-        run: |
-          set -e
-
-          if [ ! -s assets/icon/lovemix.png ]; then
-            ICON=$(find extraido -type f \
-              \( -iname 'lovemix.png' -o -iname 'icon.png' \) \
-              -print -quit)
-
-            if [ -z "$ICON" ]; then
-              echo "ERRO: Ícone não encontrado!"
-              exit 1
-            fi
-
-            mkdir -p assets/icon
-            cp "$ICON" assets/icon/lovemix.png
-          fi
-
-          test -s assets/icon/lovemix.png
-          echo "Ícone LoveMix encontrado!"
-
       - name: Criar estrutura Android
         run: flutter create . --platforms=android
 
-      - name: Fixar versões do Gradle e Kotlin
+      - name: Fixar versões compatíveis do Android Gradle Plugin e Kotlin
         shell: bash
         run: |
-          set -e
-
-          python3 - <<'PY'
+          python3 - <<'PYCODE'
           from pathlib import Path
           import re
 
-          GRADLE_VERSION = "8.14.3"
+          # Flutter mais recente pode criar o projeto com AGP 9.x. Os plugins
+          # ZEGO usados neste app ainda precisam do fluxo Kotlin/Gradle legado.
+          candidates = [Path("android/settings.gradle.kts"), Path("android/settings.gradle")]
+          settings = next((p for p in candidates if p.exists()), None)
+          if settings is None:
+              raise SystemExit("ERRO: não encontrei android/settings.gradle(.kts).")
 
-          settings = Path("android/settings.gradle.kts")
+          content = settings.read_text()
+          patterns = [
+              (r'(id\("com\.android\.application"\)\s+version\s+")[^\"]+(")', r'\g<1>8.13.0\g<2>'),
+              (r'(id\("org\.jetbrains\.kotlin\.android"\)\s+version\s+")[^\"]+(")', r'\g<1>2.2.20\g<2>'),
+              (r"(id\s+['\"]com\.android\.application['\"]\s+version\s+['\"])[^'\"]+(['\"])", r'\g<1>8.13.0\g<2>'),
+              (r"(id\s+['\"]org\.jetbrains\.kotlin\.android['\"]\s+version\s+['\"])[^'\"]+(['\"])", r'\g<1>2.2.20\g<2>'),
+          ]
+          for pattern, repl in patterns:
+              content = re.sub(pattern, repl, content)
 
-          if not settings.exists():
-              raise SystemExit("ERRO: settings.gradle.kts não encontrado!")
-
-          s = settings.read_text()
-
-          if not re.search(r'plugins\s*\{', s):
-              raise SystemExit("ERRO: bloco plugins não encontrado!")
-
-          versions = {
-              "com.android.application": "8.13.0",
-              "com.android.library": "8.13.0",
-              "org.jetbrains.kotlin.android": "2.2.20",
-              "com.google.gms.google-services": "4.4.2",
-          }
-
-          for plugin, version in versions.items():
-              pattern = (
-                  r'id\(["\']' + re.escape(plugin) +
-                  r'["\']\)\s+version\s+["\'][^"\']+["\']'
-                  r'(?:\s+apply\s+false)?'
-              )
-
-              replacement = (
-                  f'id("{plugin}") version "{version}" apply false'
-              )
-
-              if re.search(pattern, s):
-                  s = re.sub(pattern, lambda m: replacement, s, count=1)
-              else:
-                  s = re.sub(
-                      r'plugins\s*\{',
-                      lambda m: m.group(0) + '\n    ' + replacement,
-                      s,
-                      count=1
-                  )
-
-          settings.write_text(s)
+          # Se a versão ainda não existir, insere os plugins no bloco plugins.
+          if not re.search(r'com\.android\.application.*version.*8\.13\.0', content):
+              content = re.sub(r'plugins\s*\{', 'plugins {\n    id("com.android.application") version "8.13.0" apply false', content, count=1)
+          if not re.search(r'org\.jetbrains\.kotlin\.android.*version.*2\.2\.20', content):
+              content = re.sub(r'plugins\s*\{', 'plugins {\n    id("org.jetbrains.kotlin.android") version "2.2.20" apply false', content, count=1)
+          settings.write_text(content)
 
           wrapper = Path("android/gradle/wrapper/gradle-wrapper.properties")
-
           if not wrapper.exists():
-              raise SystemExit("ERRO: Gradle Wrapper não encontrado!")
-
+              raise SystemExit("ERRO: gradle-wrapper.properties não encontrado.")
           w = wrapper.read_text()
-
-          new_url = (
-              "distributionUrl=https\\://services.gradle.org/distributions/"
-              f"gradle-{GRADLE_VERSION}-bin.zip"
-          )
-
-          if re.search(r'^distributionUrl=.*$', w, flags=re.M):
-              w = re.sub(
-                  r'^distributionUrl=.*$',
-                  lambda m: new_url,
-                  w,
-                  flags=re.M
-              )
-          else:
-              w += "\n" + new_url + "\n"
-
+          w = re.sub(r'^distributionUrl=.*$', 'distributionUrl=https\\://services.gradle.org/distributions/gradle-8.14.3-bin.zip', w, flags=re.M)
+          if "distributionUrl=" not in w:
+              w += "\ndistributionUrl=https\\://services.gradle.org/distributions/gradle-8.14.3-bin.zip\n"
           wrapper.write_text(w)
 
-          print("AGP 8.13.0")
-          print("Kotlin 2.2.20")
-          print(f"Gradle {GRADLE_VERSION}")
-          print("Android Library configurado!")
-          PY
+          # Confirma explicitamente que AGP 9/Gradle 9 não ficaram ativos.
+          final_settings = settings.read_text()
+          if "8.13.0" not in final_settings or "2.2.20" not in final_settings:
+              raise SystemExit("ERRO: não consegui fixar AGP 8.13.0 e Kotlin 2.2.20.")
+          if "gradle-8.14.3-bin.zip" not in wrapper.read_text():
+              raise SystemExit("ERRO: não consegui fixar Gradle 8.14.3.")
+          print(f"Configuração aplicada em {settings}: AGP 8.13.0 + Kotlin 2.2.20 + Gradle 8.14.3.")
+          PYCODE
 
-      - name: Configurar Android e Desugaring
+      - name: Configurar permissões de câmera e microfone para ZEGOCLOUD
         run: |
           python3 - <<'PY'
           from pathlib import Path
           import re
-
-          p = Path("android/app/build.gradle.kts")
-
-          if not p.exists():
-              raise SystemExit("ERRO: build.gradle.kts não encontrado!")
-
-          s = p.read_text()
-
-          s = re.sub(
-              r'compileSdk\s*=\s*[^\n]+',
-              'compileSdk = 36',
-              s,
-              count=1
-          )
-
-          if "isCoreLibraryDesugaringEnabled" not in s:
-              m = re.search(r'compileOptions\s*\{', s)
-              if not m:
-                  raise SystemExit("compileOptions não encontrado!")
-              s = (
-                  s[:m.end()]
-                  + '\n        isCoreLibraryDesugaringEnabled = true'
-                  + s[m.end():]
-              )
-
-          dep = 'coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")'
-
-          if "desugar_jdk_libs" not in s:
-              m = re.search(r'dependencies\s*\{', s)
-              if m:
-                  s = s[:m.end()] + '\n    ' + dep + s[m.end():]
-              else:
-                  s += '\ndependencies {\n    ' + dep + '\n}\n'
-
+          gradle = Path("android/app/build.gradle.kts")
+          if not gradle.exists():
+              raise SystemExit("Gradle Android não encontrado.")
+          s = gradle.read_text()
+          s = re.sub(r'compileSdk\s*=\s*[^\n]+', 'compileSdk = 36', s, count=1)
+          gradle.write_text(s)
           manifest = Path("android/app/src/main/AndroidManifest.xml")
           content = manifest.read_text()
-
           permissions = [
-              "android.permission.INTERNET",
-              "android.permission.CAMERA",
-              "android.permission.RECORD_AUDIO",
-              "android.permission.MODIFY_AUDIO_SETTINGS",
-              "android.permission.POST_NOTIFICATIONS",
+              'android.permission.INTERNET',
+              'android.permission.CAMERA',
+              'android.permission.RECORD_AUDIO',
+              'android.permission.MODIFY_AUDIO_SETTINGS',
           ]
-
           for permission in permissions:
               tag = f'<uses-permission android:name="{permission}"/>'
-              if permission not in content:
-                  content = content.replace(
-                      '<application',
-                      '    ' + tag + '\n    <application',
-                      1
-                  )
-
+              if tag not in content:
+                  content = content.replace('<application', tag + '\n    <application', 1)
           manifest.write_text(content)
-          p.write_text(s)
-
-          print("Desugaring e permissões configurados!")
+          print("compileSdk 36 e permissões de câmera/microfone configurados.")
           PY
 
-      - name: Configurar Firebase e Google Login
+      - name: Otimizar download do Gradle
         run: |
-          set -e
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          wrapper = Path("android/gradle/wrapper/gradle-wrapper.properties")
+          if not wrapper.exists():
+              raise SystemExit("Não encontrei gradle-wrapper.properties após criar o projeto Android.")
+          content = wrapper.read_text()
+          content = re.sub(r'gradle-([0-9.]+)-all\.zip', r'gradle-\1-bin.zip', content)
+          if "networkTimeout=" in content:
+              content = re.sub(r'networkTimeout=\d+', 'networkTimeout=120000', content)
+          else:
+              content += "\nnetworkTimeout=120000\n"
+          wrapper.write_text(content)
+          print("Gradle configurado para baixar o pacote binário menor, com timeout ampliado.")
+          PY
 
-          if [ ! -f google-services.json ]; then
-            echo "ERRO: google-services.json não encontrado!"
+      - name: Configurar Firebase Android
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          mkdir -p android/app
+          if [ -n "$GOOGLE_SERVICES_JSON" ]; then
+            printf '%s' "$GOOGLE_SERVICES_JSON" > android/app/google-services.json
+            echo "Usando GOOGLE_SERVICES_JSON do GitHub Secrets."
+          elif [ -f google-services.json ]; then
+            cp google-services.json android/app/google-services.json
+            echo "Usando google-services.json incluído no projeto."
+          elif [ -f lovemix_work/google-services.json ]; then
+            cp lovemix_work/google-services.json android/app/google-services.json
+            echo "Usando google-services.json incluído em lovemix_work/."
+          else
+            echo "ERRO: google-services.json não encontrado; adicione o arquivo ou configure GOOGLE_SERVICES_JSON."
             exit 1
           fi
-
-          mkdir -p android/app
-          cp google-services.json android/app/google-services.json
-
           python3 - <<'PY'
-          import json
-          import re
+          import json, re
           from pathlib import Path
-          import os
-
-          config = json.loads(
-              Path("android/app/google-services.json").read_text()
-          )
-
-          client = config["client"][0]
-
-          package = client["client_info"]["android_client_info"]["package_name"]
-
-          if package != "com.example.lovemix":
+          config = json.loads(Path("android/app/google-services.json").read_text())
+          package_name = config["client"][0]["client_info"]["android_client_info"]["package_name"]
+          if package_name != "com.example.lovemix":
               raise SystemExit(
-                  "ERRO: pacote Firebase diferente de com.example.lovemix: "
-                  + package
+                  f"Pacote no google-services.json ({package_name}) diferente do esperado (com.example.lovemix)."
               )
-
-          oauth = client.get("oauth_client", [])
-
-          web = next(
-              (
-                  x.get("client_id", "")
-                  for x in oauth
-                  if str(x.get("client_type")) == "3"
-              ),
-              ""
+          oauth_clients = config["client"][0].get("oauth_client", [])
+          has_web_client = any(str(client.get("client_type")) == "3" for client in oauth_clients)
+          if not has_web_client:
+              raise SystemExit(
+                  "O google-services.json do secret GOOGLE_SERVICES_JSON não contém cliente OAuth WEB (client_type 3). "
+                  "Baixe novamente o arquivo no Firebase depois de cadastrar SHA-1/SHA-256 e atualizar a configuração Google."
+              )
+          web_client = next(
+              str(client.get("client_id", ""))
+              for client in oauth_clients
+              if str(client.get("client_type")) == "3"
           )
-
-          if not web.endswith(".apps.googleusercontent.com"):
-              raise SystemExit("ERRO: cliente OAuth WEB não encontrado!")
-
+          if not web_client.endswith(".apps.googleusercontent.com"):
+              raise SystemExit("O cliente OAuth WEB do google-services.json está inválido.")
+          with open("/tmp/lovemix-google-client.env", "w") as env_file:
+              env_file.write(f"GOOGLE_SERVER_CLIENT_ID={web_client}\n")
+          with open(__import__("os").environ["GITHUB_ENV"], "a") as env_file:
+              env_file.write(f"GOOGLE_SERVER_CLIENT_ID={web_client}\n")
+          settings = Path("android/settings.gradle.kts")
           app = Path("android/app/build.gradle.kts")
-          a = app.read_text()
-
-          marker = 'id("com.google.gms.google-services")'
-
-          if marker not in a:
-              a = a.replace(
-                  "plugins {",
-                  "plugins {\n    " + marker,
-                  1
-              )
-
-          a = re.sub(
-              r'namespace\s*=\s*"[^"]+"',
-              f'namespace = "{package}"',
-              a,
-              count=1
-          )
-
-          a = re.sub(
-              r'applicationId\s*=\s*"[^"]+"',
-              f'applicationId = "{package}"',
-              a,
-              count=1
-          )
-
-          app.write_text(a)
-
-          with open(os.environ["GITHUB_ENV"], "a") as f:
-              f.write(f"GOOGLE_SERVER_CLIENT_ID={web}\n")
-
-          print("Firebase configurado!")
-          print("Google Login configurado!")
-          print("Pacote:", package)
+          if settings.exists():
+              s = settings.read_text()
+              marker = 'id("com.google.gms.google-services") version "4.4.2" apply false'
+              if marker not in s:
+                  s = s.replace('plugins {', 'plugins {\n    ' + marker, 1)
+                  settings.write_text(s)
+          if app.exists():
+              s = app.read_text()
+              s = re.sub(r'namespace = "[^"]+"', f'namespace = "{package_name}"', s, count=1)
+              s = re.sub(r'applicationId = "[^"]+"', f'applicationId = "{package_name}"', s, count=1)
+              marker = 'id("com.google.gms.google-services")'
+              if marker not in s:
+                  s = s.replace('plugins {', 'plugins {\n    ' + marker, 1)
+              app.write_text(s)
+          manifest = Path("android/app/src/main/AndroidManifest.xml")
+          if manifest.exists():
+              s = manifest.read_text()
+              permission = '<uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>'
+              if permission not in s:
+                  s = s.replace('<application', permission + '\n    <application', 1)
+              manifest.write_text(s)
+          print(f"Package Android configurado para o Firebase: {package_name}")
           PY
 
-      - name: Instalar dependências Flutter
+
+      - name: Ativar core library desugaring
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          gradle = Path("android/app/build.gradle.kts")
+          if not gradle.exists():
+              raise SystemExit("Não encontrei android/app/build.gradle.kts")
+          s = gradle.read_text()
+          m = re.search(r'compileOptions\s*\{', s)
+          if not m:
+              raise SystemExit("Bloco compileOptions não encontrado no Gradle Android.")
+          start = m.end()
+          if "isCoreLibraryDesugaringEnabled" not in s:
+              s = s[:start] + '\n        isCoreLibraryDesugaringEnabled = true' + s[start:]
+          if "desugar_jdk_libs" not in s:
+              dep = re.search(r'dependencies\s*\{', s)
+              if dep:
+                  pos = dep.end()
+                  s = s[:pos] + '\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")' + s[pos:]
+              else:
+                  s += '\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n'
+          gradle.write_text(s)
+          print("Core library desugaring ativado.")
+          PY
+
+      - name: Configurar assinatura fixa do APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ] || [ -z "$ANDROID_KEYSTORE_PASSWORD" ] || [ -z "$ANDROID_KEY_ALIAS" ] || [ -z "$ANDROID_KEY_PASSWORD" ]; then
+            echo "AVISO: secrets ANDROID_* de assinatura não configurados."
+            echo "O APK será compilado com a chave debug padrão do Android para permitir testar o aplicativo."
+            echo "ATENÇÃO: login Google em APK de teste pode exigir cadastrar o SHA-1 da chave debug no Firebase. Para distribuição, configure uma chave release persistente."
+            exit 0
+          fi
+          mkdir -p android/keystore
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/keystore/lovemix-release.jks
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import re
+          gradle = Path("android/app/build.gradle.kts")
+          s = gradle.read_text()
+          if 'create("release")' not in s:
+              signing = '''signingConfigs {
+                  create("release") {
+                      storeFile = file(System.getenv("ANDROID_KEYSTORE_PATH"))
+                      storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                      keyAlias = System.getenv("ANDROID_KEY_ALIAS")
+                      keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+                  }
+              }
+          '''
+              s = re.sub(r'buildTypes\s*\{', signing + 'buildTypes {', s, count=1)
+          s, count = re.subn(r'signingConfig\s*=\s*signingConfigs\.getByName\("debug"\)', 'signingConfig = signingConfigs.getByName("release")', s, count=1)
+          if count == 0:
+              s = re.sub(r'release\s*\{', 'release {\n            signingConfig = signingConfigs.getByName("release")', s, count=1)
+          gradle.write_text(s)
+          print("Assinatura release persistente configurada.")
+          PYCODE
+          echo "ANDROID_KEYSTORE_PATH=$GITHUB_WORKSPACE/android/keystore/lovemix-release.jks" >> "$GITHUB_ENV"
+
+      - name: Instalar dependências
         run: flutter pub get
 
-      - name: Corrigir Gradle do Zego ZIM 3.2.0
-        shell: bash
-        run: |
-          set -e
 
-          python3 - <<'PY'
+      - name: Corrigir Gradle legado do plugin Zego ZIM
+        run: |
+          python3 - <<'PYCODE'
           from pathlib import Path
           import re
 
           cache = Path.home() / ".pub-cache/hosted/pub.dev"
+          candidates = sorted(cache.glob("zego_zim-*/android/build.gradle"))
+          if not candidates:
+              raise SystemExit("ERRO: não encontrei o build.gradle Android do pacote zego_zim após flutter pub get.")
 
-          files = sorted(cache.glob("zego_zim-*/android/build.gradle"))
+          for gradle in candidates:
+              content = gradle.read_text()
+              original = content
+              content = re.sub(r"\bjcenter\s*\(\s*\)", "mavenCentral()", content)
 
-          if not files:
-              raise SystemExit(
-                  "ERRO: zego_zim não encontrado após flutter pub get!"
-              )
-
-          for p in files:
-              s = p.read_text()
-
-              # Remover jcenter antigo
-              s = re.sub(
-                  r'\bjcenter\s*\(\s*\)',
-                  'mavenCentral()',
-                  s
-              )
-
-              # Garantir Android Library antes do Kotlin
-              android_plugin = (
-                  r'id\s*\(?\s*["\']com\.android\.library["\']'
-                  r'|apply\s+plugin\s*:\s*["\']com\.android\.library["\']'
-              )
-
-              if not re.search(android_plugin, s):
-                  m = re.search(r'plugins\s*\{', s)
-
-                  if m:
-                      s = (
-                          s[:m.end()]
-                          + "\n    id 'com.android.library'"
-                          + s[m.end():]
+              # O plugin Android precisa ser aplicado no módulo antes do Kotlin.
+              plugins_match = re.search(r"(?m)^\s*plugins\s*\{", content)
+              if plugins_match:
+                  block_start = plugins_match.end()
+                  block_end = content.find("}", block_start)
+                  if block_end == -1:
+                      raise SystemExit(f"ERRO: bloco plugins inválido em {gradle}")
+                  plugin_block = content[block_start:block_end]
+                  if not re.search(r"com\.android\.library", plugin_block):
+                      content = content[:block_start] + "\n    id 'com.android.library'" + content[block_start:]
+              else:
+                  android_apply = re.search(
+                      r"(?m)^\s*apply\s+plugin\s*:\s*['\"]com\.android\.(?:library|application)['\"]",
+                      content
+                  )
+                  if not android_apply:
+                      kotlin_apply = re.search(
+                          r"(?m)^\s*apply\s+plugin\s*:\s*['\"](?:kotlin-android|org\.jetbrains\.kotlin\.android)['\"]",
+                          content
                       )
-                  else:
-                      m = re.search(
-                          r'(?m)^\s*apply\s+plugin\s*:\s*'
-                          r'["\'](?:kotlin-android|org\.jetbrains\.kotlin\.android)["\']',
-                          s
-                      )
-
-                      if m:
-                          s = (
-                              s[:m.start()]
-                              + "apply plugin: 'com.android.library'\n"
-                              + s[m.start():]
-                          )
+                      line = "apply plugin: 'com.android.library'\n"
+                      if kotlin_apply:
+                          content = content[:kotlin_apply.start()] + line + content[kotlin_apply.start():]
                       else:
-                          s = "apply plugin: 'com.android.library'\n" + s
+                          content = line + content
 
-              p.write_text(s)
+              if content != original:
+                  gradle.write_text(content)
+                  print(f"Corrigido: {gradle}")
+              else:
+                  print(f"Arquivo já estava compatível: {gradle}")
 
-              check = p.read_text()
+              check = gradle.read_text()
+              if re.search(r"\bjcenter\s*\(", check):
+                  raise SystemExit(f"ERRO: jcenter() ainda aparece em {gradle}")
+              has_android = bool(
+                  re.search(r"id\s*\(?\s*['\"]com\.android\.library['\"]", check)
+                  or re.search(r"apply\s+plugin\s*:\s*['\"]com\.android\.library['\"]", check)
+                  or re.search(r"id\s*\(?\s*['\"]com\.android\.application['\"]", check)
+                  or re.search(r"apply\s+plugin\s*:\s*['\"]com\.android\.application['\"]", check)
+              )
+              if not has_android:
+                  raise SystemExit(f"ERRO: plugin Android não foi aplicado em {gradle}")
 
-              if re.search(r'\bjcenter\s*\(', check):
-                  raise SystemExit("ERRO: jcenter ainda encontrado!")
+          print("ZEGO ZIM: jcenter() removido e plugin Android garantido antes da configuração Kotlin.")
+          PYCODE
 
-              if not re.search(android_plugin, check):
-                  raise SystemExit("ERRO: plugin Android Library ausente!")
-
-              print("Zego corrigido:", p)
-
-          print("Correção do Zego concluída!")
-          PY
-
-      - name: Mostrar SHA-1 e SHA-256 de depuração
-        continue-on-error: true
+      - name: Forçar compileSdk 36 nos plugins ZEGO (corrige android-31)
         run: |
-          cd android
-          chmod +x gradlew
-          ./gradlew signingReport
-          cd ..
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import re
+
+          cache = Path.home() / ".pub-cache/hosted/pub.dev"
+          files = []
+          for pattern in ("zego_*/android/build.gradle", "zego_*/android/build.gradle.kts"):
+              files += sorted(cache.glob(pattern))
+          if not files:
+              raise SystemExit("ERRO: não encontrei build.gradle dos plugins zego_* no pub-cache.")
+
+          for gradle in files:
+              content = gradle.read_text()
+              original = content
+              kts = gradle.suffix == ".kts"
+              new_line = r"\g<1>compileSdk = 36" if kts else r"\g<1>compileSdk 36"
+              content = re.sub(r"(?m)^(\s*)compileSdk(?:Version)?\b[ \t]*=?[ \t]*[^\n]+$", new_line, content)
+              if content != original:
+                  gradle.write_text(content)
+                  print(f"compileSdk -> 36: {gradle}")
+              else:
+                  print(f"Sem compileSdk para alterar (ou já ok): {gradle}")
+          PYCODE
 
       - name: Verificar ícone roxo e preto do LoveMix
         run: |
-          set -e
           test -s assets/icon/lovemix.png || { echo "ERRO: assets/icon/lovemix.png não encontrado."; exit 1; }
-          test -s assets/lovemix_launcher.png || { echo "ERRO: assets/lovemix_launcher.png não encontrado."; exit 1; }
           file assets/icon/lovemix.png
 
       - name: Gerar e validar ícones nativos do LoveMix
         run: |
-          set -e
-
-          # Gera os recursos Android (fundo roxo/preto #09000F) a partir do pubspec.yaml
+          # Gera os recursos Android a partir de assets/lovemix_launcher.png.
           dart run flutter_launcher_icons:main -f pubspec.yaml
 
-          # Garante que o Android use o ícone gerado, e não o ícone padrão do Flutter
+          # Garante que o Android use o ícone gerado, e não o ícone padrão do Flutter.
           python3 - <<'PY'
           from pathlib import Path
           import re
@@ -442,136 +398,44 @@ jobs:
 
           resources = Path("android/app/src/main/res")
           required = [
-              resources / d / "ic_launcher.png"
-              for d in (
-                  "mipmap-mdpi", "mipmap-hdpi", "mipmap-xhdpi",
-                  "mipmap-xxhdpi", "mipmap-xxxhdpi",
-              )
+              resources / "mipmap-mdpi" / "ic_launcher.png",
+              resources / "mipmap-hdpi" / "ic_launcher.png",
+              resources / "mipmap-xhdpi" / "ic_launcher.png",
+              resources / "mipmap-xxhdpi" / "ic_launcher.png",
+              resources / "mipmap-xxxhdpi" / "ic_launcher.png",
           ]
           missing = [str(p) for p in required if not p.exists()]
           if missing:
               raise SystemExit("ERRO: ícones Android ausentes: " + ", ".join(missing))
-
           print("Ícone LoveMix gerado e validado em todas as densidades Android.")
+          print('Manifesto configurado com android:icon="@mipmap/ic_launcher".')
           PY
-
-      - name: Corrigir cores Dart
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          for p in Path("lib").rglob("*.dart"):
-              s = p.read_text(encoding="utf-8")
-              novo = s.replace("Colors.white90", "Colors.white")
-
-              if novo != s:
-                  p.write_text(novo, encoding="utf-8")
-          PY
-
-      - name: Corrigir erros de código Dart
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          # 1) flutter_local_notifications 22.x usa parâmetros nomeados
-          n = Path("lib/services/notification_service.dart")
-          if n.exists():
-              s = n.read_text(encoding="utf-8")
-              s = s.replace(
-                  "await _local.initialize(settings);",
-                  "await _local.initialize(settings: settings);"
-              )
-              s = s.replace(
-                  "await _local.show(\n      message.hashCode,\n      title,\n      body,\n      NotificationDetails(",
-                  "await _local.show(\n      id: message.hashCode,\n      title: title,\n      body: body,\n      notificationDetails: NotificationDetails("
-              )
-              n.write_text(s, encoding="utf-8")
-
-          # 2) Parêntese sobrando na tela de interações da sala (ZEGO)
-          z = Path("lib/screens/zego_live_screen.dart")
-          if z.exists():
-              s = z.read_text(encoding="utf-8")
-              old = (
-                  "                }),\n"
-                  "              ),\n"
-                  "              const SizedBox(height: 14),\n"
-                  "              SizedBox(width: double.infinity, child: ElevatedButton.icon("
-              )
-              new = (
-                  "                }),\n"
-                  "              const SizedBox(height: 14),\n"
-                  "              SizedBox(width: double.infinity, child: ElevatedButton.icon("
-              )
-              s = s.replace(old, new)
-              z.write_text(s, encoding="utf-8")
-
-          print("Correções Dart aplicadas!")
-          PY
-
-      - name: Corrigir teste MyApp
-        run: |
-          mkdir -p test
-
-          cat > test/widget_test.dart <<'EOF'
-          import 'package:flutter_test/flutter_test.dart';
-
-          void main() {
-            test('Teste básico do LoveMix', () {
-              expect(true, isTrue);
-            });
-          }
-          EOF
 
       - name: Verificar código Dart
-        continue-on-error: true
-        run: flutter analyze --no-pub
+        run: flutter analyze
 
-      - name: Gerar APK LoveMix
+      - name: Compilar APK release
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ github.workspace }}/android/keystore/lovemix-release.jks
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          flutter build apk --release \
-            --dart-define=GOOGLE_SERVER_CLIENT_ID="$GOOGLE_SERVER_CLIENT_ID"
-
-      - name: Verificar assinatura do APK
-        run: |
-          set -e
-
-          APK="build/app/outputs/flutter-apk/app-release.apk"
-
-          test -f "$APK"
-
-          APKSIGNER=$(find "$ANDROID_HOME/build-tools" \
-            -type f -name apksigner | sort -V | tail -n 1)
-
-          "$APKSIGNER" verify --print-certs "$APK"
-
-      - name: Mostrar SHA-1 e SHA-256 do APK
-        run: |
-          set -e
-
-          APK="build/app/outputs/flutter-apk/app-release.apk"
-
-          APKSIGNER=$(find "$ANDROID_HOME/build-tools" \
-            -type f -name apksigner | sort -V | tail -n 1)
-
-          "$APKSIGNER" verify --print-certs "$APK" > cert.txt
-
-          SHA1=$(grep "SHA-1 digest:" cert.txt | head -n 1 | awk '{print $3}')
-          SHA256=$(grep "SHA-256 digest:" cert.txt | head -n 1 | awk '{print $3}')
-
-          {
-            echo "## LoveMix - Certificados"
-            echo ""
-            echo "SHA-1: $SHA1"
-            echo ""
-            echo "SHA-256: $SHA256"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          echo "SHA-1: $SHA1"
-          echo "SHA-256: $SHA256"
+          for attempt in 1 2 3; do
+            echo "Tentativa $attempt de 3 para gerar o APK..."
+            if flutter build apk --release --dart-define=GOOGLE_SERVER_CLIENT_ID="$GOOGLE_SERVER_CLIENT_ID"; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "A compilação falhou. Aguardando 20 segundos antes de tentar novamente..."
+              sleep 20
+            fi
+          done
+          echo "ERRO: não foi possível gerar o APK após 3 tentativas."
+          exit 1
 
       - name: Disponibilizar APK
         uses: actions/upload-artifact@v4
         with:
           name: lovemix-apk
           path: build/app/outputs/flutter-apk/app-release.apk
-          if-no-files-found: error
