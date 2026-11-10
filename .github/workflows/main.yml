@@ -28,7 +28,6 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-          cache: gradle
 
       - name: Configurar Flutter
         uses: subosito/flutter-action@v2
@@ -47,6 +46,38 @@ jobs:
 
       - name: Compilar APK
         run: flutter build apk --release
+
+      - name: Mostrar SHA-1 e SHA-256
+        shell: bash
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" \
+            -type f -name apksigner | sort -V | tail -n 1)
+
+          if [ ! -f "$APK" ]; then
+            echo "APK não encontrado!"
+            exit 1
+          fi
+
+          if [ -z "$APKSIGNER" ]; then
+            echo "Apksigner não encontrado!"
+            exit 1
+          fi
+
+          "$APKSIGNER" verify --print-certs "$APK" | tee cert-info.txt
+
+          SHA1=$(grep "certificate SHA-1 digest" cert-info.txt | head -n 1 | awk -F ': ' '{print $2}')
+          SHA256=$(grep "certificate SHA-256 digest" cert-info.txt | head -n 1 | awk -F ': ' '{print $2}')
+
+          echo "## Códigos de assinatura LoveMix" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**SHA-1:** \`$SHA1\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**SHA-256:** \`$SHA256\`" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "::notice title=SHA-1::$SHA1"
+          echo "::notice title=SHA-256::$SHA256"
 
       - name: Salvar APK para download
         uses: actions/upload-artifact@v4
