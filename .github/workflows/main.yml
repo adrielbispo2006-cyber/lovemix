@@ -1,4 +1,3 @@
-
 name: Gerar APK LoveMix
 
 on:
@@ -7,7 +6,7 @@ on:
     branches:
       - main
     paths:
-      - '**.zip'
+      - '*.zip'
       - '.github/workflows/**'
 
 permissions:
@@ -17,6 +16,7 @@ jobs:
   build:
     name: Compilar LoveMix
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
       - name: Baixar arquivos do GitHub
@@ -28,7 +28,7 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Instalar Flutter
+      - name: Instalar Flutter estável
         uses: subosito/flutter-action@v2
         with:
           channel: stable
@@ -39,66 +39,182 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y unzip zip
 
-      - name: Extrair ZIP atualizado
+      - name: Verificar ZIP do LoveMix
         shell: bash
         run: |
-          set -e
-
+          set -euo pipefail
+          mapfile -t ZIPS < <( find . -maxdepth 1 -type f -iname '*.zip' | sort )
+          if [ "${#ZIPS[@]}" -ne 1 ]; then
+            echo "::error::Coloque exatamente um ZIP do LoveMix na raiz do repositório."
+            exit 1
+          fi
+          echo "ZIP encontrado: ${ZIPS[0]}"
           mkdir -p extracted
+          unzip -q "${ZIPS[0]}" -d extracted
 
-          ZIP_FILE=$(find . -maxdepth 1 -type f -iname "*.zip" | head -n 1)
-
-          if [ -z "$ZIP_FILE" ]; then
-            echo "ERRO: Nenhum arquivo ZIP encontrado na raiz."
+      - name: Localizar projeto Flutter
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROJECT_DIR=""
+          while IFS= read -r -d '' FILE; do
+            DIR="$(dirname "$FILE")"
+            if [ -s "$DIR/lib/main.dart" ]; then
+              PROJECT_DIR="$DIR"
+              break
+            fi
+          done < <( find extracted -type f -name pubspec.yaml -print0 )
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "::error::Projeto Flutter inválido: pubspec.yaml ou lib/main.dart ausente."
             exit 1
           fi
+          echo "Projeto encontrado: $PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "ZIP encontrado: $ZIP_FILE"
+      - name: Conferir arquivos obrigatórios
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          for FILE in \
+            pubspec.yaml \
+            lib/main.dart \
+            android/app/src/main/AndroidManifest.xml
+          do
+            if [ ! -s "$FILE" ]; then
+              echo "::error::Arquivo ausente ou vazio: $FILE"
+              exit 1
+            fi
+          done
+          echo "Arquivos obrigatórios encontrados."
 
-          unzip -o "$ZIP_FILE" -d extracted
-
-          PUBSPEC=$(find extracted -name pubspec.yaml -type f | head -n 1)
-
-          if [ -z "$PUBSPEC" ]; then
-            echo "ERRO: pubspec.yaml não encontrado."
-            exit 1
-          fi
-
-          PROJECT_DIR=$(dirname "$PUBSPEC")
-
-          echo "Projeto Flutter: $PROJECT_DIR"
-          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+      - name: Verificar versão Flutter e Java
+        run: |
+          flutter --version
+          java -version
 
       - name: Baixar dependências Flutter
+        shell: bash
         run: |
+          set -euo pipefail
           cd "$PROJECT_DIR"
           flutter pub get
 
-      - name: Verificar versão Flutter
+      - name: Verificar dependências
+        shell: bash
         run: |
-          flutter --version
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          flutter pub deps
 
-      - name: Gerar APK Release
+      - name: Compilar APK Release
+        shell: bash
         run: |
+          set -euo pipefail
           cd "$PROJECT_DIR"
           flutter build apk --release
 
-      - name: Localizar APK
+      - name: Localizar e validar APK
+        shell: bash
         run: |
-          APK=$(find "$PROJECT_DIR/build/app/outputs/flutter-apk" -name "*.apk" -type f | head -n 1)
-
-          if [ -z "$APK" ]; then
-            echo "ERRO: APK não encontrado."
+          set -euo pipefail
+          APK="$PROJECT_DIR/build/app/outputs/flutter-apk/app-release.apk"
+          if [ ! -s "$APK" ]; then
+            echo "::error::APK Release não encontrado ou vazio."
             exit 1
           fi
-
           mkdir -p "$GITHUB_WORKSPACE/apk-final"
           cp "$APK" "$GITHUB_WORKSPACE/apk-final/LoveMix.apk"
+          echo "APK gerado com sucesso."
+          ls -lh "$GITHUB_WORKSPACE/apk-final/LoveMix.apk"
 
-      - name: Disponibilizar APK para baixar
+      - name: Gerar SHA-1 e SHA-256 do APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/apk-final"
+          SHA1=$(sha1sum LoveMix.apk | awk '{print $1}')
+          SHA256=$(sha256sum LoveMix.apk | awk '{print $1}')
+          {
+            echo "SHA-1 DO APK:"
+            echo "$SHA1"
+            echo ""
+            echo "SHA-256 DO APK:"
+            echo "$SHA256"
+          } > checksums.txt
+          {
+            echo "## LoveMix - Assinaturas do APK"
+            echo ""
+            echo "### SHA-1 do APK"
+            echo '```text'
+            echo "$SHA1"
+            echo '```'
+            echo ""
+            echo "### SHA-256 do APK"
+            echo '```text'
+            echo "$SHA256"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "SHA-1: $SHA1"
+          echo "SHA-256: $SHA256"
+
+      - name: Verificar certificado de assinatura Android
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/apk-final"
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          APKSIGNER=""
+          if [ -n "$SDK" ] && [ -d "$SDK/build-tools" ]; then
+            APKSIGNER=$(find "$SDK/build-tools" \
+              -type f -name apksigner | sort -V | tail -n 1 || true)
+          fi
+          if [ -z "$APKSIGNER" ]; then
+            echo "Aviso: apksigner não encontrado."
+            echo "Não foi possível verificar o certificado."
+            echo "Não foi possível verificar o certificado de assinatura." > certificate.txt
+            exit 0
+          fi
+          if "$APKSIGNER" verify --print-certs LoveMix.apk > cert-output.txt 2>&1; then
+            cat cert-output.txt
+            CERT_SHA1=$(grep -i 'certificate SHA-1 digest:' cert-output.txt | head -n 1 | sed 's/.*digest: *//')
+            CERT_SHA256=$(grep -i 'certificate SHA-256 digest:' cert-output.txt | head -n 1 | sed 's/.*digest: *//')
+            if [ -n "$CERT_SHA1" ] && [ -n "$CERT_SHA256" ]; then
+              {
+                echo "SHA-1 DO CERTIFICADO:"
+                echo "$CERT_SHA1"
+                echo ""
+                echo "SHA-256 DO CERTIFICADO:"
+                echo "$CERT_SHA256"
+              } > certificate.txt
+              {
+                echo ""
+                echo "### SHA-1 do certificado Android"
+                echo '```text'
+                echo "$CERT_SHA1"
+                echo '```'
+                echo ""
+                echo "### SHA-256 do certificado Android"
+                echo '```text'
+                echo "$CERT_SHA256"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "Certificado não identificado." > certificate.txt
+              echo "::warning::Não foi possível extrair as fingerprints do certificado."
+            fi
+          else
+            echo "APK sem assinatura verificável." > certificate.txt
+            echo "::warning::O APK não possui certificado verificável. Confira a configuração de assinatura Release."
+          fi
+
+      - name: Disponibilizar APK e assinaturas
         uses: actions/upload-artifact@v4
         with:
           name: LoveMix-APK
-          path: apk-final/LoveMix.apk
+          path: |
+            apk-final/LoveMix.apk
+            apk-final/checksums.txt
+            apk-final/certificate.txt
           if-no-files-found: error
           retention-days: 7
