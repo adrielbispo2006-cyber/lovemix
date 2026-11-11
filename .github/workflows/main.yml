@@ -48,41 +48,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          mapfile -t ZIPS < <(
-            find . -maxdepth 1 -type f -iname '*.zip' | sort
-          )
+          mapfile -t ZIPS < <(find . -maxdepth 1 -type f -iname '*.zip' | sort)
 
           if [ "${#ZIPS[@]}" -ne 1 ]; then
-            echo "::error::Deixe somente um ZIP do LoveMix na raiz."
+            echo "::error::Deixe somente um ZIP na raiz."
             exit 1
           fi
 
-          ZIP_FILE="${ZIPS[0]}"
-          unzip -t "$ZIP_FILE"
-
+          unzip -t "${ZIPS[0]}"
           mkdir -p extracted
-          unzip -q "$ZIP_FILE" -d extracted
-
-          echo "ZIP extraído com sucesso."
+          unzip -q "${ZIPS[0]}" -d extracted
 
       - name: Localizar projeto Flutter
         shell: bash
         run: |
           set -euo pipefail
-
           PROJECT_DIR=""
 
           while IFS= read -r -d '' FILE; do
             DIR="$(dirname "$FILE")"
-
             if [ -s "$DIR/lib/main.dart" ]; then
               PROJECT_DIR="$DIR"
               break
             fi
-          done < <(
-            find extracted -type f -name pubspec.yaml -print0
-          )
+          done < <(find extracted -type f -name pubspec.yaml -print0)
 
           if [ -z "$PROJECT_DIR" ]; then
             echo "::error::Projeto Flutter não encontrado."
@@ -90,26 +79,36 @@ jobs:
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Projeto encontrado: $PROJECT_DIR"
 
       - name: Verificar arquivos obrigatórios
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+
+          for FILE in pubspec.yaml lib/main.dart android/gradlew android/gradle/wrapper/gradle-wrapper.properties android/app/src/main/AndroidManifest.xml; do
+            test -s "$FILE" || {
+              echo "::error::Arquivo ausente: $FILE"
+              exit 1
+            }
+          done
+
+      - name: Conferir versão do Gradle Wrapper
         shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
 
-          for FILE in \
-            pubspec.yaml \
-            lib/main.dart \
-            android/app/src/main/AndroidManifest.xml
-          do
-            if [ ! -s "$FILE" ]; then
-              echo "::error::Arquivo ausente: $FILE"
-              exit 1
-            fi
-          done
+          WRAPPER_FILE="android/gradle/wrapper/gradle-wrapper.properties"
+          GRADLE_URL="$(grep -E '^distributionUrl=' "$WRAPPER_FILE" | cut -d= -f2- | tr -d '\\')"
 
-          echo "Arquivos obrigatórios OK."
+          echo "Gradle configurado: $GRADLE_URL"
+
+          if [[ "$GRADLE_URL" != *"gradle-9.3.1-"* ]]; then
+            echo "::error::O ZIP não contém Gradle 9.3.1."
+            exit 1
+          fi
+
+          chmod +x android/gradlew
 
       - name: Verificar ambiente
         run: |
@@ -118,96 +117,55 @@ jobs:
           flutter doctor -v
 
       - name: Baixar dependências Flutter
-        shell: bash
         run: |
-          set -euo pipefail
           cd "$PROJECT_DIR"
-
           flutter pub get
 
-      - name: Verificar dependências resolvidas
-        shell: bash
+      - name: Verificar dependências
         run: |
-          set -euo pipefail
           cd "$PROJECT_DIR"
-
           flutter pub deps
-
-          if [ ! -s pubspec.lock ]; then
-            echo "::error::pubspec.lock não foi gerado."
-            exit 1
-          fi
+          test -s pubspec.lock
 
       - name: Analisar código Flutter
-        shell: bash
         run: |
-          set -euo pipefail
           cd "$PROJECT_DIR"
-
-          flutter analyze --no-pub \
-            --no-fatal-infos \
-            --no-fatal-warnings
+          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings
 
       - name: Compilar APK Release
-        shell: bash
         run: |
-          set -euo pipefail
           cd "$PROJECT_DIR"
-
           flutter build apk --release
 
       - name: Localizar e validar APK
-        shell: bash
         run: |
           set -euo pipefail
-
           APK="$PROJECT_DIR/build/app/outputs/flutter-apk/app-release.apk"
 
-          if [ ! -s "$APK" ]; then
-            echo "::error::APK não encontrado ou vazio."
-            exit 1
-          fi
-
+          test -s "$APK"
           mkdir -p "$GITHUB_WORKSPACE/apk-final"
-
           cp "$APK" "$GITHUB_WORKSPACE/apk-final/LoveMix.apk"
 
-          echo "APK gerado:"
-          ls -lh "$GITHUB_WORKSPACE/apk-final/LoveMix.apk"
-
-      - name: Gerar SHA-1 e SHA-256 do APK
-        shell: bash
+      - name: Gerar SHA-1 e SHA-256
         run: |
-          set -euo pipefail
-
           cd "$GITHUB_WORKSPACE/apk-final"
 
-          SHA1=$(sha1sum LoveMix.apk | awk '{print $1}')
-          SHA256=$(sha256sum LoveMix.apk | awk '{print $1}')
-
-          {
-            echo "SHA-1 DO APK:"
-            echo "$SHA1"
-            echo ""
-            echo "SHA-256 DO APK:"
-            echo "$SHA256"
-          } > checksums.txt
+          sha1sum LoveMix.apk | awk '{print $1}' > sha1.txt
+          sha256sum LoveMix.apk | awk '{print $1}' > sha256.txt
 
           {
             echo "## LOVE MIX - ASSINATURAS"
-            echo ""
-            echo "### SHA-1"
-            echo '```'
-            echo "$SHA1"
-            echo '```'
-            echo ""
-            echo "### SHA-256"
-            echo '```'
-            echo "$SHA256"
-            echo '```'
+            echo "SHA-1: $(cat sha1.txt)"
+            echo "SHA-256: $(cat sha256.txt)"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          cat checksums.txt
+          {
+            echo "SHA-1 DO APK:"
+            cat sha1.txt
+            echo ""
+            echo "SHA-256 DO APK:"
+            cat sha256.txt
+          } > checksums.txt
 
       - name: Enviar APK e assinaturas
         uses: actions/upload-artifact@v4
