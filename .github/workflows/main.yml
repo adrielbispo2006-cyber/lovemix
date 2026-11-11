@@ -24,6 +24,7 @@ jobs:
             echo "Projeto encontrado na raiz do repositório."
             exit 0
           fi
+
           # 1) Projeto dentro de uma subpasta (ex.: lovemix_work/)
           while IFS= read -r f; do
             d="$(dirname "$f")"
@@ -33,6 +34,7 @@ jobs:
               exit 0
             fi
           done < <(find . -maxdepth 4 -name pubspec.yaml -not -path './.git/*' -not -path '*/node_modules/*' | sort)
+
           # 2) Zip do projeto enviado como arquivo para o repositório
           while IFS= read -r z; do
             if unzip -l "$z" 2>/dev/null | grep -q 'pubspec.yaml'; then
@@ -48,6 +50,7 @@ jobs:
               done < <(find /tmp/proj_zip -maxdepth 3 -name pubspec.yaml | sort)
             fi
           done < <(find . -maxdepth 3 -iname '*.zip' -not -path './.git/*' | sort -r)
+
           echo "::error::Não encontrei o projeto Flutter (pubspec.yaml + lib/main.dart) em nenhum lugar do repositório."
           echo "Conteúdo do repositório:"
           find . -maxdepth 2 -not -path './.git/*' -not -path './.git' | sort | head -60
@@ -89,10 +92,12 @@ jobs:
           lib/services/zego_config.dart
           lib/widgets/profile_frame.dart
           LISTA
+
           if [ "$missing" -ne 0 ]; then
             echo "::error::Faltam arquivos do projeto no GitHub (lista acima). Envie esses arquivos nas mesmas pastas do zip e rode de novo."
             exit 1
           fi
+
           echo "Todos os arquivos de código estão no repositório."
           for f in assets/icon/lovemix.png assets/lovemix_launcher.png assets/lovemix_couple.jpg; do
             [ -s "$f" ] && echo "OK: $f" || echo "::warning::Imagem ausente: $f (o workflow tenta achar ou criar uma substituta)."
@@ -100,221 +105,107 @@ jobs:
 
       - name: Aplicar código corrigido do ZEGO e das notificações
         run: |
-          mkdir -p lib/screens lib/services
-          cat > /tmp/novo_zego_live_screen.dart <<'LOVEMIX_ZEGO'
-          import 'package:cloud_firestore/cloud_firestore.dart';
-          import 'package:firebase_auth/firebase_auth.dart';
-          import 'package:flutter/material.dart';
-          import 'package:flutter/services.dart';
-          import '../services/data_service.dart';
-          import '../services/zego_config.dart';
-          import 'package:zego_uikit_prebuilt_live_audio_room/zego_uikit_prebuilt_live_audio_room.dart';
-          import 'package:zego_uikit_prebuilt_live_streaming/zego_uikit_prebuilt_live_streaming.dart';
-          import 'package:zego_uikit_signaling_plugin/zego_uikit_signaling_plugin.dart';
+          python3 scripts/apply_patches.py
 
-          class ZegoLiveHubScreen extends StatelessWidget {
-            const ZegoLiveHubScreen({super.key, required this.mediaMode});
-            final String mediaMode; // audio, video ou live
+      - name: Instalar Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
 
-            String get _title => mediaMode == 'audio' ? 'Salas de Voz' : mediaMode == 'video' ? 'Salas de Vídeo' : 'Lives LoveMix';
+      - name: Cache do Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper/dists
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', 'pubspec.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
 
-            @override
-            Widget build(BuildContext context) {
-              return Scaffold(
-                backgroundColor: const Color(0xFF080510),
-                appBar: AppBar(
-                  title: Text(_title),
-                  actions: [
-                    IconButton(
-                      tooltip: 'Entrar com código',
-                      icon: const Icon(Icons.key_rounded),
-                      onPressed: () => _joinByCode(context),
-                    ),
-                  ],
-                ),
-                floatingActionButton: FloatingActionButton.extended(
-                  backgroundColor: const Color(0xFFFF2DAB),
-                  foregroundColor: Colors.white,
-                  icon: const Icon(Icons.add),
-                  label: Text(mediaMode == 'audio' ? 'Criar sala de voz' : 'Começar live de vídeo'),
-                  onPressed: () => _create(context),
-                ),
-                body: Column(children: [
-                  Container(
-                    margin: const EdgeInsets.all(16),
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      gradient: const LinearGradient(
-                        colors: [Color(0xFF35104F), Color(0xFF170D25)],
-                      ),
-                      borderRadius: BorderRadius.circular(18),
-                      border: Border.all(color: const Color(0xFF9B35FF)),
-                    ),
-                    child: Row(children: [
-                      Icon(mediaMode == 'audio' ? Icons.mic : Icons.live_tv, color: const Color(0xFFFF55D0), size: 34),
-                      const SizedBox(width: 12),
-                      Expanded(child: Text(
-                        mediaMode == 'audio' ? 'Entre no palco, peça para falar e converse ao vivo.' : 'Crie uma transmissão ou entre em uma live da comunidade.',
-                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
-                      )),
-                    ]),
-                  ),
-                  Expanded(
-                    child: StreamBuilder<QuerySnapshot>>(
-                      stream: DataService.instance.publicLiveRooms(mediaMode: mediaMode),
-                      builder: (context, snap) {
-                        if (snap.hasError) {
-                          return const Center(child: Text('Erro ao carregar transmissões. Confira as regras e índices do Firestore.'));
-                        }
-                        if (!snap.hasData) {
-                          return const Center(child: CircularProgressIndicator(color: Color(0xFFFF2DAB)));
-                        }
-                        final docs = snap.data!.docs;
-                        if (docs.isEmpty) {
-                          return Center(child: Padding(
-                            padding: const EdgeInsets.all(28),
-                            child: Column(mainAxisSize: MainAxisSize.min, children: [
-                              const Icon(Icons.sensors, size: 54, color: Color(0xFFB65BDB)),
-                              const SizedBox(height: 12),
-                              const Text('Nenhuma transmissão agora', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17)),
-                              const SizedBox(height: 6),
-                              const Text('Seja a primeira pessoa a criar uma sala!', textAlign: TextAlign.center, style: TextStyle(color: Colors.white60)),
-                            ]),
-                          ));
-                        }
-                        return ListView.builder(
-                          padding: const EdgeInsets.fromLTRB(14, 4, 14, 100),
-                          itemCount: docs.length,
-                          itemBuilder: (context, index) {
-                            final doc = docs[index];
-                            final data = doc.data();
-                            final members = List<String>.from(data['members'] ?? []);
-                            return Card(
-                              color: const Color(0xFF1A1028),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(16),
-                                side: const BorderSide(color: Color(0xFF71349B)),
-                              ),
-                              child: ListTile(
-                                contentPadding: const EdgeInsets.all(12),
-                                leading: CircleAvatar(
-                                  backgroundColor: const Color(0xFF7027A5),
-                                  child: Icon(mediaMode == 'audio' ? Icons.mic : Icons.videocam, color: Colors.white),
-                                ),
-                                title: Text((data['name'] ?? 'Sala LoveMix').toString(), style: const TextStyle(fontWeight: FontWeight.bold)),
-                                subtitle: Text('${members.length} participantes • AO VIVO', style: const TextStyle(color: Colors.white60)),
-                                trailing: const Icon(Icons.play_circle_fill, color: Color(0xFFFF45C4), size: 30),
-                                onTap: () async {
-                                  try {
-                                    if (!members.contains(DataService.instance.uid)) {
-                                      await DataService.instance.joinRoom(doc.id);
-                                    }
-                                    if (!context.mounted) return;
-                                    Navigator.push(context, MaterialPageRoute(
-                                      builder: (_) => ZegoMediaSessionScreen(
-                                        roomId: doc.id,
-                                        roomName: (data['name'] ?? 'Sala LoveMix').toString(),
-                                        mediaMode: mediaMode,
-                                        isHost: data['ownerId'] == DataService.instance.uid,
-                                      ),
-                                    ));
-                                  } catch (e) {
-                                    if (context.mounted) {
-                                      ScaffoldMessenger.of(context).showSnackBar(
-                                          SnackBar(content: Text('Não foi possível entrar: $e')));
-                                    }
-                                  }
-                                },
-                              ),
-                            );
-                          },
-                        );
-                      },
-                    ),
-                  ),
-                ]),
-              );
-            }
+      - name: Instalar Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
 
-            Future<void> _joinByCode(BuildContext context) async {
-              final controller = TextEditingController();
-              final code = await showDialog<String>(
-                context: context,
-                builder: (ctx) => AlertDialog(
-                  backgroundColor: const Color(0xFF21132F),
-                  title: const Text('Entrar com código'),
-                  content: TextField(
-                    controller: controller,
-                    decoration: const InputDecoration(labelText: 'Código da sala'),
-                  ),
-                  actions: [
-                    TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancelar')),
-                    ElevatedButton(
-                      onPressed: () {
-                        final value = controller.text.trim();
-                        if (value.isNotEmpty) Navigator.pop(ctx, value);
-                      },
-                      child: const Text('Entrar'),
-                    ),
-                  ],
-                ),
-              );
-              controller.dispose();
-              if (code == null || !context.mounted) return;
-              try {
-                final room = await FirebaseFirestore.instance.collection('rooms').doc(code).get();
-                final data = room.data();
-                if (!room.exists || data == null || data['isLive'] != true || data['mediaMode'] != mediaMode) {
-                  throw Exception('Código inválido ou transmissão encerrada.');
-                }
-                final members = List<String>.from(data['members'] ?? []);
-                if (!members.contains(DataService.instance.uid)) {
-                  await DataService.instance.joinRoom(code);
-                }
-                if (!context.mounted) return;
-                Navigator.push(context, MaterialPageRoute(
-                  builder: (_) => ZegoMediaSessionScreen(
-                    roomId: code,
-                    roomName: (data['name'] ?? 'Sala LoveMix').toString(),
-                    mediaMode: mediaMode,
-                    isHost: data['ownerId'] == DataService.instance.uid,
-                  ),
-                ));
-              } catch (e) {
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))));
-                }
-              }
-            }
+      - name: Garantir versões compatíveis com ZEGO
+        shell: bash
+        run: |
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import re
+          p = Path("pubspec.yaml")
+          if not p.exists():
+              raise SystemExit("ERRO: pubspec.yaml não encontrado na raiz.")
+          content = p.read_text()
+          fixes = {
+              "permission_handler": "^13.0.2",
+              "cached_network_image": "^4.0.6",
+              "zego_uikit_prebuilt_live_audio_room": "^3.16.12",
+          }
+          for name, version in fixes.items():
+              content, count = re.subn(
+                  r"(?m)^(\s*)" + name + r":\s*[^\n#]+",
+                  lambda m: m.group(1) + name + ": " + version,
+                  content,
+                  count=1,
+              )
+              if count != 1:
+                  raise SystemExit("ERRO: " + name + " não encontrado no pubspec.yaml.")
+              print(name + " fixado em " + version)
+          p.write_text(content)
+          PYCODE
+          rm -f pubspec.lock
+          grep -nE "permission_handler|cached_network_image|zego_uikit_prebuilt_live_audio_room" pubspec.yaml
 
-            Future<void> _create(BuildContext context) async {
-              final controller = TextEditingController();
-              final name = await showDialog<String>(
-                context: context,
-                builder: (ctx) => AlertDialog(
-                  backgroundColor: const Color(0xFF21132F),
-                  title: Text(mediaMode == 'audio' ? 'Criar sala de voz' : 'Criar live de vídeo'),
-                  content: TextField(
-                    controller: controller,
-                    maxLength: 40,
-                    decoration: const InputDecoration(labelText: 'Nome da sala'),
-                  ),
-                  actions: [
-                    TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancelar')),
-                    ElevatedButton(
-                      onPressed: () {
-                        final value = controller.text.trim();
-                        if (value.length >= 3) Navigator.pop(ctx, value);
-                      },
-                      child: const Text('Criar'),
-                    ),
-                  ],
-                ),
-              );
-              controller.dispose();
-              if (name == null || !context.mounted) return;
-              try {
-                final id = await DataService.instance.createRoom(
-                  name,
-                  category: mediaMode == 'audio' ? 'Salas de Voz
+      - name: Criar estrutura Android
+        run: flutter create . --platforms=android
+
+      - name: Configurar AGP 9.1.1, Gradle 9.3.1 e compatibilidade Kotlin
+        shell: bash
+        run: |
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import re
+          candidates = [Path("android/settings.gradle.kts"), Path("android/settings.gradle")]
+          settings = next((p for p in candidates if p.exists()), None)
+          if settings is None:
+              raise SystemExit("ERRO: não encontrei android/settings.gradle(.kts).")
+          content = settings.read_text()
+          patterns = [
+              (r'(id\("com\.android\.application"\)\s+version\s+")[^\"]+(\")', r'\g<1>9.1.1\g<2>'),
+              (r'(id\("org\.jetbrains\.kotlin\.android"\)\s+version\s+")[^\"]+(\")', r'\g<1>2.2.20\g<2>'),
+              (r"(id\s+['\"]com\.android\.application['\"]\s+version\s+['\"])[^'\"]+(['\"])", r'\g<1>9.1.1\g<2>'),
+              (r"(id\s+['\"]org\.jetbrains\.kotlin\.android['\"]\s+version\s+['\"])[^'\"]+(['\"])", r'\g<1>2.2.20\g<2>'),
+          ]
+          for pattern, repl in patterns:
+              content = re.sub(pattern, repl, content)
+          if not re.search(r'com\.android\.application.*version.*9\.1\.1', content, re.S):
+              content = re.sub(r'plugins\s*\{', 'plugins {\n id("com.android.application") version "9.1.1" apply false', content, count=1)
+          if not re.search(r'org\.jetbrains\.kotlin\.android.*version.*2\.2\.20', content, re.S):
+              content = re.sub(r'plugins\s*\{', 'plugins {\n id("org.jetbrains.kotlin.android") version "2.2.20" apply false', content, count=1)
+          settings.write_text(content)
+
+          wrapper = Path("android/gradle/wrapper/gradle-wrapper.properties")
+          if not wrapper.exists():
+              raise SystemExit("ERRO: gradle-wrapper.properties não encontrado.")
+          w = wrapper.read_text()
+          w = re.sub(r'^distributionUrl=.*$', 'distributionUrl=https\\://services.gradle.org/distributions/gradle-9.3.1-bin.zip', w, flags=re.M)
+          if "distributionUrl=" not in w:
+              w += "\ndistributionUrl=https\\://services.gradle.org/distributions/gradle-9.3.1-bin.zip\n"
+          wrapper.write_text(w)
+
+          props = Path("android/gradle.properties")
+          p = props.read_text() if props.exists() else ""
+          if re.search(r'(?m)^android\.builtInKotlin\s*=', p):
+              p = re.sub(r'(?m)^android\.builtInKotlin\s*=.*$', 'android.builtInKotlin=false', p)
+          else:
+              p = p.rstrip() + "\nandroid.builtInKotlin=false\n"
+          props.write_text(p)
+
+          if "9.1.1" not in settings.read_text() or "2.2.20" not in settings.read_text():
+              raise SystemExit("ERRO: não consegui fixar AGP 9.1.1 e Kotlin 2.2.20.")
+          if "gradle-9.3.1-bin.zip" not in wrapper.read_text():
+              raise SystemExit("ERRO: não consegui fixar Gradle 9.3.1.")
+          if "android.builtInKotlin=false" not in props.read_
