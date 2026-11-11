@@ -1,88 +1,320 @@
-
 name: Gerar APK LoveMix
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
-      - master
-    paths:
-      - '**'
-      - '.github/workflows/build-apk.yml'
+    branches: [ "main" ]
 
-permissions:
-  contents: read
+concurrency:
+  group: lovemix-apk-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
-    name: Compilar APK Android
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Baixar projeto
         uses: actions/checkout@v4
 
-      - name: Instalar Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Configurar Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          cache: true
-
-      - name: Verificar Flutter
-        run: flutter doctor -v
-
-      - name: Baixar dependências
-        run: flutter pub get
-
-      - name: Verificar dependências
-        run: flutter pub deps
-
-      - name: Compilar APK
-        run: flutter build apk --release
-
-      - name: Mostrar SHA-1 e SHA-256
-        shell: bash
+      - name: Localizar o projeto Flutter no repositório
         run: |
-          APK="build/app/outputs/flutter-apk/app-release.apk"
+          if [ -f pubspec.yaml ] && [ -f lib/main.dart ]; then
+            echo "Projeto encontrado na raiz do repositório."
+            exit 0
+          fi
+          # 1) Projeto dentro de uma subpasta (ex.: lovemix_work/)
+          while IFS= read -r f; do
+            d="$(dirname "$f")"
+            if [ -f "$d/lib/main.dart" ]; then
+              echo "Projeto encontrado na subpasta: $d (copiando para a raiz)"
+              cp -a "$d"/. .
+              exit 0
+            fi
+          done < <(find . -maxdepth 4 -name pubspec.yaml -not -path './.git/*' -not -path '*/node_modules/*' | sort)
+          # 2) Zip do projeto enviado como arquivo para o repositório
+          while IFS= read -r z; do
+            if unzip -l "$z" 2>/dev/null | grep -q 'pubspec.yaml'; then
+              rm -rf /tmp/proj_zip && mkdir -p /tmp/proj_zip
+              unzip -q "$z" -d /tmp/proj_zip || continue
+              while IFS= read -r f; do
+                d="$(dirname "$f")"
+                if [ -f "$d/lib/main.dart" ]; then
+                  echo "Projeto encontrado dentro do zip: $z (extraindo para a raiz)"
+                  cp -a "$d"/. .
+                  exit 0
+                fi
+              done < <(find /tmp/proj_zip -maxdepth 3 -name pubspec.yaml | sort)
+            fi
+          done < <(find . -maxdepth 3 -iname '*.zip' -not -path './.git/*' | sort -r)
+          echo "::error::Não encontrei o projeto Flutter (pubspec.yaml + lib/main.dart) em nenhum lugar do repositório."
+          echo "Conteúdo do repositório:"
+          find . -maxdepth 2 -not -path './.git/*' -not -path './.git' | sort | head -60
+          exit 1
 
-          APKSIGNER=$(find "$ANDROID_HOME/build-tools" \
-            -type f -name apksigner | sort -V | tail -n 1)
-
-          if [ ! -f "$APK" ]; then
-            echo "APK não encontrado!"
+      - name: Conferir arquivos do projeto no repositório
+        run: |
+          missing=0
+          while read -r f; do
+            [ -z "$f" ] && continue
+            if [ ! -s "$f" ]; then
+              echo "FALTANDO no repositório: $f"
+              missing=1
+            fi
+          done <<'LISTA'
+          pubspec.yaml
+          lib/main.dart
+          lib/app.dart
+          lib/firebase_options.dart
+          lib/screens/admin_screen.dart
+          lib/screens/alliance_wall_screen.dart
+          lib/screens/auth_screen.dart
+          lib/screens/chat_rooms_screen.dart
+          lib/screens/chat_screen.dart
+          lib/screens/discover_screen.dart
+          lib/screens/home_screen.dart
+          lib/screens/messages_screen.dart
+          lib/screens/post_interactions_screen.dart
+          lib/screens/profile_frames_screen.dart
+          lib/screens/profile_screen.dart
+          lib/screens/profile_view_screen.dart
+          lib/screens/ranking_screen.dart
+          lib/screens/resources_screen.dart
+          lib/screens/stories_widget.dart
+          lib/screens/wallet_screen.dart
+          lib/screens/zego_live_screen.dart
+          lib/services/data_service.dart
+          lib/services/notification_service.dart
+          lib/services/zego_config.dart
+          lib/widgets/profile_frame.dart
+          LISTA
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Faltam arquivos do projeto no GitHub (lista acima). Envie esses arquivos nas mesmas pastas do zip e rode de novo."
             exit 1
           fi
+          echo "Todos os arquivos de código estão no repositório."
+          for f in assets/icon/lovemix.png assets/lovemix_launcher.png assets/lovemix_couple.jpg; do
+            [ -s "$f" ] && echo "OK: $f" || echo "::warning::Imagem ausente: $f (o workflow tenta achar ou criar uma substituta)."
+          done
 
-          if [ -z "$APKSIGNER" ]; then
-            echo "Apksigner não encontrado!"
-            exit 1
-          fi
+      - name: Aplicar código corrigido do ZEGO e das notificações
+        run: |
+          mkdir -p lib/screens lib/services
+          cat > /tmp/novo_zego_live_screen.dart <<'LOVEMIX_ZEGO'
+          import 'package:cloud_firestore/cloud_firestore.dart';
+          import 'package:firebase_auth/firebase_auth.dart';
+          import 'package:flutter/material.dart';
+          import 'package:flutter/services.dart';
+          import '../services/data_service.dart';
+          import '../services/zego_config.dart';
+          import 'package:zego_uikit_prebuilt_live_audio_room/zego_uikit_prebuilt_live_audio_room.dart';
+          import 'package:zego_uikit_prebuilt_live_streaming/zego_uikit_prebuilt_live_streaming.dart';
+          import 'package:zego_uikit_signaling_plugin/zego_uikit_signaling_plugin.dart';
 
-          "$APKSIGNER" verify --print-certs "$APK" | tee cert-info.txt
+          class ZegoLiveHubScreen extends StatelessWidget {
+            const ZegoLiveHubScreen({super.key, required this.mediaMode});
+            final String mediaMode; // audio, video ou live
 
-          SHA1=$(grep "certificate SHA-1 digest" cert-info.txt | head -n 1 | awk -F ': ' '{print $2}')
-          SHA256=$(grep "certificate SHA-256 digest" cert-info.txt | head -n 1 | awk -F ': ' '{print $2}')
+            String get _title => mediaMode == 'audio' ? 'Salas de Voz' : mediaMode == 'video' ? 'Salas de Vídeo' : 'Lives LoveMix';
 
-          echo "## Códigos de assinatura LoveMix" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**SHA-1:** \`$SHA1\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**SHA-256:** \`$SHA256\`" >> "$GITHUB_STEP_SUMMARY"
+            @override
+            Widget build(BuildContext context) {
+              return Scaffold(
+                backgroundColor: const Color(0xFF080510),
+                appBar: AppBar(
+                  title: Text(_title),
+                  actions: [
+                    IconButton(
+                      tooltip: 'Entrar com código',
+                      icon: const Icon(Icons.key_rounded),
+                      onPressed: () => _joinByCode(context),
+                    ),
+                  ],
+                ),
+                floatingActionButton: FloatingActionButton.extended(
+                  backgroundColor: const Color(0xFFFF2DAB),
+                  foregroundColor: Colors.white,
+                  icon: const Icon(Icons.add),
+                  label: Text(mediaMode == 'audio' ? 'Criar sala de voz' : 'Começar live de vídeo'),
+                  onPressed: () => _create(context),
+                ),
+                body: Column(children: [
+                  Container(
+                    margin: const EdgeInsets.all(16),
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                        colors: [Color(0xFF35104F), Color(0xFF170D25)],
+                      ),
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(color: const Color(0xFF9B35FF)),
+                    ),
+                    child: Row(children: [
+                      Icon(mediaMode == 'audio' ? Icons.mic : Icons.live_tv, color: const Color(0xFFFF55D0), size: 34),
+                      const SizedBox(width: 12),
+                      Expanded(child: Text(
+                        mediaMode == 'audio' ? 'Entre no palco, peça para falar e converse ao vivo.' : 'Crie uma transmissão ou entre em uma live da comunidade.',
+                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                      )),
+                    ]),
+                  ),
+                  Expanded(
+                    child: StreamBuilder<QuerySnapshot>>(
+                      stream: DataService.instance.publicLiveRooms(mediaMode: mediaMode),
+                      builder: (context, snap) {
+                        if (snap.hasError) {
+                          return const Center(child: Text('Erro ao carregar transmissões. Confira as regras e índices do Firestore.'));
+                        }
+                        if (!snap.hasData) {
+                          return const Center(child: CircularProgressIndicator(color: Color(0xFFFF2DAB)));
+                        }
+                        final docs = snap.data!.docs;
+                        if (docs.isEmpty) {
+                          return Center(child: Padding(
+                            padding: const EdgeInsets.all(28),
+                            child: Column(mainAxisSize: MainAxisSize.min, children: [
+                              const Icon(Icons.sensors, size: 54, color: Color(0xFFB65BDB)),
+                              const SizedBox(height: 12),
+                              const Text('Nenhuma transmissão agora', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17)),
+                              const SizedBox(height: 6),
+                              const Text('Seja a primeira pessoa a criar uma sala!', textAlign: TextAlign.center, style: TextStyle(color: Colors.white60)),
+                            ]),
+                          ));
+                        }
+                        return ListView.builder(
+                          padding: const EdgeInsets.fromLTRB(14, 4, 14, 100),
+                          itemCount: docs.length,
+                          itemBuilder: (context, index) {
+                            final doc = docs[index];
+                            final data = doc.data();
+                            final members = List<String>.from(data['members'] ?? []);
+                            return Card(
+                              color: const Color(0xFF1A1028),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(16),
+                                side: const BorderSide(color: Color(0xFF71349B)),
+                              ),
+                              child: ListTile(
+                                contentPadding: const EdgeInsets.all(12),
+                                leading: CircleAvatar(
+                                  backgroundColor: const Color(0xFF7027A5),
+                                  child: Icon(mediaMode == 'audio' ? Icons.mic : Icons.videocam, color: Colors.white),
+                                ),
+                                title: Text((data['name'] ?? 'Sala LoveMix').toString(), style: const TextStyle(fontWeight: FontWeight.bold)),
+                                subtitle: Text('${members.length} participantes • AO VIVO', style: const TextStyle(color: Colors.white60)),
+                                trailing: const Icon(Icons.play_circle_fill, color: Color(0xFFFF45C4), size: 30),
+                                onTap: () async {
+                                  try {
+                                    if (!members.contains(DataService.instance.uid)) {
+                                      await DataService.instance.joinRoom(doc.id);
+                                    }
+                                    if (!context.mounted) return;
+                                    Navigator.push(context, MaterialPageRoute(
+                                      builder: (_) => ZegoMediaSessionScreen(
+                                        roomId: doc.id,
+                                        roomName: (data['name'] ?? 'Sala LoveMix').toString(),
+                                        mediaMode: mediaMode,
+                                        isHost: data['ownerId'] == DataService.instance.uid,
+                                      ),
+                                    ));
+                                  } catch (e) {
+                                    if (context.mounted) {
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                          SnackBar(content: Text('Não foi possível entrar: $e')));
+                                    }
+                                  }
+                                },
+                              ),
+                            );
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                ]),
+              );
+            }
 
-          echo "::notice title=SHA-1::$SHA1"
-          echo "::notice title=SHA-256::$SHA256"
+            Future<void> _joinByCode(BuildContext context) async {
+              final controller = TextEditingController();
+              final code = await showDialog<String>(
+                context: context,
+                builder: (ctx) => AlertDialog(
+                  backgroundColor: const Color(0xFF21132F),
+                  title: const Text('Entrar com código'),
+                  content: TextField(
+                    controller: controller,
+                    decoration: const InputDecoration(labelText: 'Código da sala'),
+                  ),
+                  actions: [
+                    TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancelar')),
+                    ElevatedButton(
+                      onPressed: () {
+                        final value = controller.text.trim();
+                        if (value.isNotEmpty) Navigator.pop(ctx, value);
+                      },
+                      child: const Text('Entrar'),
+                    ),
+                  ],
+                ),
+              );
+              controller.dispose();
+              if (code == null || !context.mounted) return;
+              try {
+                final room = await FirebaseFirestore.instance.collection('rooms').doc(code).get();
+                final data = room.data();
+                if (!room.exists || data == null || data['isLive'] != true || data['mediaMode'] != mediaMode) {
+                  throw Exception('Código inválido ou transmissão encerrada.');
+                }
+                final members = List<String>.from(data['members'] ?? []);
+                if (!members.contains(DataService.instance.uid)) {
+                  await DataService.instance.joinRoom(code);
+                }
+                if (!context.mounted) return;
+                Navigator.push(context, MaterialPageRoute(
+                  builder: (_) => ZegoMediaSessionScreen(
+                    roomId: code,
+                    roomName: (data['name'] ?? 'Sala LoveMix').toString(),
+                    mediaMode: mediaMode,
+                    isHost: data['ownerId'] == DataService.instance.uid,
+                  ),
+                ));
+              } catch (e) {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))));
+                }
+              }
+            }
 
-      - name: Salvar APK para download
-        uses: actions/upload-artifact@v4
-        with:
-          name: LoveMix-APK
-          path: build/app/outputs/flutter-apk/app-release.apk
-          if-no-files-found: error
-          retention-days: 30
+            Future<void> _create(BuildContext context) async {
+              final controller = TextEditingController();
+              final name = await showDialog<String>(
+                context: context,
+                builder: (ctx) => AlertDialog(
+                  backgroundColor: const Color(0xFF21132F),
+                  title: Text(mediaMode == 'audio' ? 'Criar sala de voz' : 'Criar live de vídeo'),
+                  content: TextField(
+                    controller: controller,
+                    maxLength: 40,
+                    decoration: const InputDecoration(labelText: 'Nome da sala'),
+                  ),
+                  actions: [
+                    TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancelar')),
+                    ElevatedButton(
+                      onPressed: () {
+                        final value = controller.text.trim();
+                        if (value.length >= 3) Navigator.pop(ctx, value);
+                      },
+                      child: const Text('Criar'),
+                    ),
+                  ],
+                ),
+              );
+              controller.dispose();
+              if (name == null || !context.mounted) return;
+              try {
+                final id = await DataService.instance.createRoom(
+                  name,
+                  category: mediaMode == 'audio' ? 'Salas de Voz
