@@ -99,26 +99,30 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          test -s pubspec.yaml
-          test -s lib/main.dart
-          test -s android/settings.gradle
-          test -s android/app/build.gradle
-          test -s android/app/src/main/AndroidManifest.xml
+          for FILE in \
+            pubspec.yaml \
+            lib/main.dart \
+            android/settings.gradle \
+            android/app/build.gradle \
+            android/app/src/main/AndroidManifest.xml
+          do
+            if [ ! -s "$FILE" ]; then
+              echo "::error::Arquivo ausente: $FILE"
+              exit 1
+            fi
+          done
 
           echo "Arquivos principais encontrados."
 
-      - name: Preparar ambiente Gradle isolado
+      - name: Preparar Gradle 9.3.1
         shell: bash
         run: |
           set -euo pipefail
 
           VERSION="9.3.1"
-
           DOWNLOAD_DIR="$RUNNER_TEMP/lovemix-gradle"
-          BOOTSTRAP_DIR="$RUNNER_TEMP/lovemix-wrapper-bootstrap"
 
           mkdir -p "$DOWNLOAD_DIR"
-          mkdir -p "$BOOTSTRAP_DIR"
 
           echo "Baixando Gradle $VERSION..."
 
@@ -130,14 +134,16 @@ jobs:
 
           GRADLE="$DOWNLOAD_DIR/gradle-${VERSION}/bin/gradle"
 
-          test -x "$GRADLE"
+          if [ ! -x "$GRADLE" ]; then
+            echo "::error::Executável Gradle não encontrado."
+            exit 1
+          fi
 
-          echo "Gradle baixado:"
           "$GRADLE" --version
 
           echo "GRADLE_BOOTSTRAP=$GRADLE" >> "$GITHUB_ENV"
 
-      - name: Gerar novamente o Gradle Wrapper
+      - name: Gerar Gradle Wrapper completo
         shell: bash
         run: |
           set -euo pipefail
@@ -157,40 +163,62 @@ jobs:
             --gradle-version 9.3.1 \
             --distribution-type bin
 
+          echo "Arquivos gerados:"
+          find "$BOOTSTRAP_DIR" -type f -print
+
+          WRAPPER_JAR="$(find "$BOOTSTRAP_DIR" \
+            -type f -name gradle-wrapper.jar -print -quit)"
+
+          if [ -z "$WRAPPER_JAR" ] || [ ! -s "$WRAPPER_JAR" ]; then
+            echo "::error::Não foi possível gerar gradle-wrapper.jar."
+            exit 1
+          fi
+
           TARGET="$PROJECT_DIR/android"
 
           mkdir -p "$TARGET/gradle/wrapper"
 
-          cp gradlew "$TARGET/gradlew"
-          cp gradlew.bat "$TARGET/gradlew.bat"
+          cp "$BOOTSTRAP_DIR/gradlew" "$TARGET/gradlew"
+          cp "$BOOTSTRAP_DIR/gradlew.bat" "$TARGET/gradlew.bat"
 
-          cp gradle/wrapper/gradle-wrapper.jar \
+          cp "$WRAPPER_JAR" \
             "$TARGET/gradle/wrapper/gradle-wrapper.jar"
 
-          cp gradle/wrapper/gradle-wrapper.properties \
+          cp "$BOOTSTRAP_DIR/gradle/wrapper/gradle-wrapper.properties" \
             "$TARGET/gradle/wrapper/gradle-wrapper.properties"
 
           chmod +x "$TARGET/gradlew"
 
-          echo "Wrapper regenerado:"
-          ls -lh "$TARGET/gradlew"
-          ls -lh "$TARGET/gradle/wrapper/"
+          echo "Wrapper copiado com sucesso."
 
       - name: Conferir configuração do Wrapper
         shell: bash
         run: |
           set -euo pipefail
 
-          WRAPPER="$PROJECT_DIR/android/gradle/wrapper/gradle-wrapper.properties"
+          TARGET="$PROJECT_DIR/android"
+          WRAPPER="$TARGET/gradle/wrapper/gradle-wrapper.properties"
+          JAR="$TARGET/gradle/wrapper/gradle-wrapper.jar"
 
+          echo "Conferindo propriedades:"
           cat "$WRAPPER"
 
-          grep -q 'gradle-9.3.1-bin.zip' "$WRAPPER"
+          if ! grep -Fq 'gradle-9.3.1-bin.zip' "$WRAPPER"; then
+            echo "::error::Endereço do Gradle incorreto."
+            exit 1
+          fi
 
-          test -s "$PROJECT_DIR/android/gradle/wrapper/gradle-wrapper.jar"
-          test -s "$PROJECT_DIR/android/gradlew"
+          if [ ! -s "$JAR" ]; then
+            echo "::error::gradle-wrapper.jar ausente ou vazio."
+            exit 1
+          fi
 
-          echo "Arquivos do Wrapper confirmados."
+          if [ ! -s "$TARGET/gradlew" ]; then
+            echo "::error::Executável gradlew ausente."
+            exit 1
+          fi
+
+          echo "Todos os arquivos do Wrapper estão presentes."
 
       - name: Verificar versão real do Gradle
         shell: bash
@@ -207,17 +235,20 @@ jobs:
 
           ./gradlew --no-daemon --version
 
-          VERSION="$(./gradlew --no-daemon --version |
-            grep -m1 '^Gradle ' | awk '{print $2}')"
+          VERSION="$(
+            ./gradlew --no-daemon --version |
+            grep -m1 '^Gradle ' |
+            awk '{print $2}'
+          )"
 
-          echo "Versão detectada: $VERSION"
+          echo "Versão encontrada: $VERSION"
 
           if [ "$VERSION" != "9.3.1" ]; then
-            echo "::error::Gradle incorreto: $VERSION"
+            echo "::error::Esperado Gradle 9.3.1, encontrado $VERSION."
             exit 1
           fi
 
-          echo "Gradle 9.3.1 confirmado!"
+          echo "Gradle 9.3.1 confirmado."
 
       - name: Configurar Android
         shell: bash
@@ -253,7 +284,7 @@ jobs:
 
           mkdir -p "$PROJECT_DIR/android/keystore"
 
-          printf '%s' "$ANDROID_KEYSTORE_BASE64" | \
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" |
             base64 --decode > \
             "$PROJECT_DIR/android/keystore/lovemix-release.jks"
 
@@ -272,7 +303,6 @@ jobs:
 
           java -version
           flutter --version
-          flutter doctor -v
 
       - name: Baixar dependências Flutter
         shell: bash
@@ -328,10 +358,9 @@ jobs:
 
           cp "$APK" "$GITHUB_WORKSPACE/apk-final/LoveMix.apk"
 
-          echo "APK gerado:"
           ls -lh "$GITHUB_WORKSPACE/apk-final/LoveMix.apk"
 
-      - name: Verificar certificado SHA-1 e SHA-256
+      - name: Verificar certificado
         shell: bash
         run: |
           set -euo pipefail
