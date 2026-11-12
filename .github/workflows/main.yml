@@ -70,13 +70,12 @@ jobs:
               break
             fi
           done < <( find extracted -type f -name pubspec.yaml -print0 )
-          
           if [ -z "$PROJECT_DIR" ]; then
             echo "::error::Projeto Flutter nao encontrado."
             exit 1
           fi
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Projeto encontrado: $PROJECT_DIR"
+          echo "Projeto localizado: $PROJECT_DIR"
 
       - name: Verificar arquivos do projeto
         shell: bash
@@ -87,100 +86,33 @@ jobs:
             pubspec.yaml \
             lib/main.dart \
             android/settings.gradle \
-            android/app/src/main/AndroidManifest.xml \
-            android/gradlew \
-            android/gradle/wrapper/gradle-wrapper.jar \
-            android/gradle/wrapper/gradle-wrapper.properties
+            android/app/src/main/AndroidManifest.xml
           do
             if [ ! -s "$FILE" ]; then
               echo "::error::Arquivo ausente: $FILE"
               exit 1
             fi
           done
-          chmod +x android/gradlew
-          echo "Arquivos verificados."
+          echo "Arquivos principais encontrados."
 
-      - name: Preparar cache Gradle
+      - name: Gerar Gradle Wrapper automaticamente
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/lovemix-gradle-home"
-          echo "GRADLE_USER_HOME=$RUNNER_TEMP/lovemix-gradle-home" >> "$GITHUB_ENV"
-
-      - name: Verificar Gradle
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$PROJECT_DIR/android"
-          ./gradlew --no-daemon --version
-
-      - name: Configurar Android
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$PROJECT_DIR"
-          touch android/gradle.properties
-          if ! grep -q '^android.suppressUnsupportedCompileSdk=' android/gradle.properties; then
-            echo 'android.suppressUnsupportedCompileSdk=37' >> android/gradle.properties
+          TARGET="$PROJECT_DIR/android"
+          WRAPPER_DIR="$TARGET/gradle/wrapper"
+          TEMP_DIR="$RUNNER_TEMP/lovemix-wrapper"
+          DOWNLOAD_DIR="$RUNNER_TEMP/lovemix-gradle"
+          mkdir -p "$WRAPPER_DIR" "$TEMP_DIR" "$DOWNLOAD_DIR"
+          PROPERTIES="$WRAPPER_DIR/gradle-wrapper.properties"
+          VERSION="8.14.3"
+          if [ -s "$PROPERTIES" ]; then
+            URL="$(sed -n 's/^distributionUrl=//p' "$PROPERTIES" | sed 's/\\:/:/g' | head -n 1)"
+            FOUND_VERSION="$( printf '\%s\n' "$URL" | sed -nE 's/.*gradle-([0-9]+\.[0-9]+(\.[0-9]+)?)-(bin|all)\.zip.*/\1/p' )"
+            if [ -n "$FOUND_VERSION" ]; then
+              VERSION="$FOUND_VERSION"
+            fi
           fi
-
-      - name: Verificar Java e Flutter
-        shell: bash
-        run: |
-          set -euo pipefail
-          java -version
-          flutter --version
-
-      - name: Baixar dependências Flutter
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$PROJECT_DIR"
-          flutter pub get
-
-      - name: Analisar código Flutter
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$PROJECT_DIR"
-          flutter analyze --no-pub \
-            --no-fatal-infos \
-            --no-fatal-warnings || \
-          echo "::warning::A analise encontrou problemas. A compilacao continuara."
-
-      - name: Confirmar Gradle
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$PROJECT_DIR/android"
-          ./gradlew --no-daemon --version
-
-      - name: Compilar APK Release
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$PROJECT_DIR"
-          flutter build apk --release --no-pub
-
-      - name: Validar APK
-        shell: bash
-        run: |
-          set -euo pipefail
-          APK="$PROJECT_DIR/build/app/outputs/flutter-apk/app-release.apk"
-          if [ ! -s "$APK" ]; then
-            echo "::error::APK nao encontrado ou vazio."
-            exit 1
-          fi
-          mkdir -p "$GITHUB_WORKSPACE/apk-final"
-          cp "$APK" "$GITHUB_WORKSPACE/apk-final/LoveMix.apk"
-          echo "APK validado:"
-          ls -lh "$GITHUB_WORKSPACE/apk-final/LoveMix.apk"
-
-      - name: Verificar SHA-1 e SHA-256
-        id: certificate
-        shell: bash
-        run: |
-          set -euo pipefail
-          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
-          if [ -z "$SDK" ]; then
-            echo "
+          echo "Versao Gradle selecionada: $VERSION"
+          curl -fL --retry 3 \
+            "https://services.gradle.org/distributions/gradle-${VERSION}-bin.zip" \ -o "$
