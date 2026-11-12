@@ -104,6 +104,8 @@ jobs:
         run: |
           set -euo pipefail
           TARGET="$PROJECT_DIR/android"
-          PROPERTIES="$TARGET/gradle/wrapper/gradle-wrapper.properties"
-          sed -i \
-            's
+          WRAPPER_DIR="$TARGET/gradle/wrapper"
+          PROPERTIES="$WRAPPER_DIR/gradle-wrapper.properties"
+          mkdir -p "$WRAPPER_DIR"
+          printf '%s\n' \
+            'distributionBase=GRADLE
