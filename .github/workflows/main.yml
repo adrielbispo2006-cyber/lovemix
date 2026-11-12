@@ -49,9 +49,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t ZIPS < <(find . -maxdepth 1 -type f -iname '*.zip' | sort)
+          mapfile -t ZIPS < <( find . -maxdepth 1 -type f -iname '*.zip' | sort )
           if [ "${#ZIPS[@]}" -ne 1 ]; then
-            echo "::error::Deixe somente um ZIP do projeto na raiz do repositorio."
+            echo "::error::Deixe somente um ZIP na raiz do repositorio."
             exit 1
           fi
           unzip -t "${ZIPS[0]}"
@@ -69,13 +69,14 @@ jobs:
               PROJECT_DIR="$DIR"
               break
             fi
-          done < <(find extracted -type f -name pubspec.yaml -print0)
+          done < <( find extracted -type f -name pubspec.yaml -print0 )
+          
           if [ -z "$PROJECT_DIR" ]; then
-            echo "::error::Projeto Flutter não encontrado."
+            echo "::error::Projeto Flutter nao encontrado."
             exit 1
           fi
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Projeto localizado: $PROJECT_DIR"
+          echo "Projeto encontrado: $PROJECT_DIR"
 
       - name: Verificar arquivos do projeto
         shell: bash
@@ -86,41 +87,100 @@ jobs:
             pubspec.yaml \
             lib/main.dart \
             android/settings.gradle \
-            android/app/build.gradle \
             android/app/src/main/AndroidManifest.xml \
-            android/gradlew; do
+            android/gradlew \
+            android/gradle/wrapper/gradle-wrapper.jar \
+            android/gradle/wrapper/gradle-wrapper.properties
+          do
             if [ ! -s "$FILE" ]; then
               echo "::error::Arquivo ausente: $FILE"
               exit 1
             fi
           done
           chmod +x android/gradlew
+          echo "Arquivos verificados."
 
-      - name: Configurar diretório Gradle
+      - name: Preparar cache Gradle
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/lovemix-gradle-home"
           echo "GRADLE_USER_HOME=$RUNNER_TEMP/lovemix-gradle-home" >> "$GITHUB_ENV"
 
-      - name: Configurar assinatura do APK
+      - name: Verificar Gradle
         shell: bash
-        env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          if [ -z "${ANDROID_KEYSTORE_BASE64:-}" ] || \
-             [ -z "${ANDROID_KEYSTORE_PASSWORD:-}" ] || \
-             [ -z "${ANDROID_KEY_ALIAS:-}" ] || \
-             [ -z "${ANDROID_KEY_PASSWORD:-}" ]; then
-            echo "::warning::Secrets de assinatura ausentes; o projeto usará a assinatura debug configurada no Gradle."
-            exit 0
+          cd "$PROJECT_DIR/android"
+          ./gradlew --no-daemon --version
+
+      - name: Configurar Android
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          touch android/gradle.properties
+          if ! grep -q '^android.suppressUnsupportedCompileSdk=' android/gradle.properties; then
+            echo 'android.suppressUnsupportedCompileSdk=37' >> android/gradle.properties
           fi
-          mkdir -p "$PROJECT_DIR/android/keystore"
-          printf '%s' "$ANDROID_KEYSTORE_BASE64" \vert{} base64 --decode > "$PROJECT_DIR/android/keystore/lovemix-release.jks"
-          test -s "$PROJECT_DIR/android/keystore/lovemix-release.jks"
-          echo "ANDROID_KEYSTORE_PATH=$GITHUB_WORKSPACE/$PROJECT_DIR/android/keystore/lovemix-release.jks" >> "$GITHUB_ENV"
-          echo "ANDROID_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD" >> "$
+
+      - name: Verificar Java e Flutter
+        shell: bash
+        run: |
+          set -euo pipefail
+          java -version
+          flutter --version
+
+      - name: Baixar dependências Flutter
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          flutter pub get
+
+      - name: Analisar código Flutter
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          flutter analyze --no-pub \
+            --no-fatal-infos \
+            --no-fatal-warnings || \
+          echo "::warning::A analise encontrou problemas. A compilacao continuara."
+
+      - name: Confirmar Gradle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR/android"
+          ./gradlew --no-daemon --version
+
+      - name: Compilar APK Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          flutter build apk --release --no-pub
+
+      - name: Validar APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$PROJECT_DIR/build/app/outputs/flutter-apk/app-release.apk"
+          if [ ! -s "$APK" ]; then
+            echo "::error::APK nao encontrado ou vazio."
+            exit 1
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/apk-final"
+          cp "$APK" "$GITHUB_WORKSPACE/apk-final/LoveMix.apk"
+          echo "APK validado:"
+          ls -lh "$GITHUB_WORKSPACE/apk-final/LoveMix.apk"
+
+      - name: Verificar SHA-1 e SHA-256
+        id: certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [ -z "$SDK" ]; then
+            echo "
