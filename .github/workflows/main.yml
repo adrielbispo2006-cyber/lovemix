@@ -43,18 +43,24 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y unzip zip curl
+          sudo apt-get install -y unzip zip curl python3
 
       - name: Verificar e extrair ZIP
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t ZIPS < <( find . -maxdepth 1 -type f -iname '*.zip' | sort )
+
+          mapfile -t ZIPS < <(
+            find . -maxdepth 1 -type f -iname '*.zip' | sort
+          )
+
           if [ "${#ZIPS[@]}" -ne 1 ]; then
-            echo "::error::Deixe somente um ZIP na raiz do repositorio."
+            echo "::error::Deixe somente um ZIP na raiz."
             exit 1
           fi
+
           unzip -t "${ZIPS[0]}"
+
           mkdir -p extracted
           unzip -q "${ZIPS[0]}" -d extracted
 
@@ -62,26 +68,36 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           PROJECT_DIR=""
+
           while IFS= read -r -d '' FILE; do
             DIR="$(dirname "$FILE")"
+
             if [ -s "$DIR/lib/main.dart" ]; then
               PROJECT_DIR="$DIR"
               break
             fi
-          done < <( find extracted -type f -name pubspec.yaml -print0 )
+          done < <(
+            find extracted -type f -name pubspec.yaml -print0
+          )
+
           if [ -z "$PROJECT_DIR" ]; then
-            echo "::error::Projeto Flutter nao encontrado."
+            echo "::error::Projeto Flutter não encontrado."
             exit 1
           fi
+
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Projeto localizado: $PROJECT_DIR"
+
+          echo "Projeto: $PROJECT_DIR"
 
       - name: Verificar arquivos do projeto
         shell: bash
         run: |
           set -euo pipefail
+
           cd "$PROJECT_DIR"
+
           for FILE in \
             pubspec.yaml \
             lib/main.dart \
@@ -93,26 +109,314 @@ jobs:
               exit 1
             fi
           done
-          echo "Arquivos principais encontrados."
+
+          echo "Arquivos encontrados."
 
       - name: Gerar Gradle Wrapper automaticamente
         shell: bash
         run: |
           set -euo pipefail
+
           TARGET="$PROJECT_DIR/android"
           WRAPPER_DIR="$TARGET/gradle/wrapper"
           TEMP_DIR="$RUNNER_TEMP/lovemix-wrapper"
           DOWNLOAD_DIR="$RUNNER_TEMP/lovemix-gradle"
-          mkdir -p "$WRAPPER_DIR" "$TEMP_DIR" "$DOWNLOAD_DIR"
+
+          mkdir -p "$WRAPPER_DIR"
+          mkdir -p "$TEMP_DIR"
+          mkdir -p "$DOWNLOAD_DIR"
+
           PROPERTIES="$WRAPPER_DIR/gradle-wrapper.properties"
-          VERSION="8.14.3"
-          if [ -s "$PROPERTIES" ]; then
-            URL="$(sed -n 's/^distributionUrl=//p' "$PROPERTIES" | sed 's/\\:/:/g' | head -n 1)"
-            FOUND_VERSION="$( printf '\%s\n' "$URL" | sed -nE 's/.*gradle-([0-9]+\.[0-9]+(\.[0-9]+)?)-(bin|all)\.zip.*/\1/p' )"
-            if [ -n "$FOUND_VERSION" ]; then
-              VERSION="$FOUND_VERSION"
-            fi
-          fi
-          echo "Versao Gradle selecionada: $VERSION"
+
+          VERSION="$(
+            python3 - "$PROPERTIES" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+
+          version = "8.14.3"
+
+          if path.is_file():
+              content = path.read_text(errors="ignore")
+
+              match = re.search(
+                  r"gradle-([0-9]+(?:\.[0-9]+){1,2})-(?:bin|all)\.zip",
+                  content
+              )
+
+              if match:
+                  version = match.group(1)
+
+          print(version)
+          PY
+          )"
+
+          echo "Gradle selecionado: $VERSION"
+
           curl -fL --retry 3 \
-            "https://services.gradle.org/distributions/gradle-${VERSION}-bin.zip" \ -o "$
+            "https://services.gradle.org/distributions/gradle-${VERSION}-bin.zip" \
+            -o "$DOWNLOAD_DIR/gradle.zip"
+
+          unzip -q "$DOWNLOAD_DIR/gradle.zip" -d "$DOWNLOAD_DIR"
+
+          GRADLE="$DOWNLOAD_DIR/gradle-${VERSION}/bin/gradle"
+
+          if [ ! -x "$GRADLE" ]; then
+            echo "::error::Executável Gradle não encontrado."
+            exit 1
+          fi
+
+          cd "$TEMP_DIR"
+
+          printf "rootProject.name = 'lovemix-bootstrap'\n" > settings.gradle
+          printf "\n" > build.gradle
+
+          "$GRADLE" \
+            --no-daemon \
+            wrapper \
+            --gradle-version "$VERSION" \
+            --distribution-type bin
+
+          test -s gradlew
+          test -s gradle/wrapper/gradle-wrapper.jar
+          test -s gradle/wrapper/gradle-wrapper.properties
+
+          cp gradlew "$TARGET/gradlew"
+          cp gradlew.bat "$TARGET/gradlew.bat"
+
+          cp gradle/wrapper/gradle-wrapper.jar \
+            "$WRAPPER_DIR/gradle-wrapper.jar"
+
+          cp gradle/wrapper/gradle-wrapper.properties \
+            "$WRAPPER_DIR/gradle-wrapper.properties"
+
+          chmod +x "$TARGET/gradlew"
+
+          echo "Gradle Wrapper instalado com sucesso."
+
+      - name: Confirmar Gradle Wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR/android"
+
+          test -s gradlew
+          test -s gradle/wrapper/gradle-wrapper.jar
+          test -s gradle/wrapper/gradle-wrapper.properties
+
+          chmod +x gradlew
+
+          ls -lh gradle/wrapper/
+
+          echo "Wrapper completo."
+
+      - name: Preparar cache Gradle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/lovemix-gradle-home"
+
+          echo "GRADLE_USER_HOME=$RUNNER_TEMP/lovemix-gradle-home" >> "$GITHUB_ENV"
+
+      - name: Configurar Android
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          touch android/gradle.properties
+
+          if ! grep -q '^android.suppressUnsupportedCompileSdk=' android/gradle.properties; then
+            echo 'android.suppressUnsupportedCompileSdk=37' >> android/gradle.properties
+          fi
+
+      - name: Verificar Java e Flutter
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          java -version
+          flutter --version
+
+      - name: Verificar Gradle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR/android"
+
+          ./gradlew --no-daemon --version
+
+      - name: Baixar dependências Flutter
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          flutter pub get
+
+      - name: Analisar código Flutter
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          flutter analyze --no-pub \
+            --no-fatal-infos \
+            --no-fatal-warnings
+
+      - name: Confirmar Gradle antes da compilação
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR/android"
+
+          ./gradlew --no-daemon --version
+
+      - name: Compilar APK Release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          flutter build apk --release --no-pub
+
+      - name: Validar APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="$PROJECT_DIR/build/app/outputs/flutter-apk/app-release.apk"
+
+          if [ ! -s "$APK" ]; then
+            echo "::error::APK não encontrado."
+            exit 1
+          fi
+
+          mkdir -p "$GITHUB_WORKSPACE/apk-final"
+
+          cp "$APK" "$GITHUB_WORKSPACE/apk-final/LoveMix.apk"
+
+          ls -lh "$GITHUB_WORKSPACE/apk-final/LoveMix.apk"
+
+      - name: Verificar SHA-1 e SHA-256
+        id: certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+
+          if [ -z "$SDK" ]; then
+            echo "::error::Android SDK não encontrado."
+            exit 1
+          fi
+
+          APKSIGNER="$(
+            find "$SDK/build-tools" \
+              -type f -name apksigner |
+              sort -V |
+              tail -n 1
+          )"
+
+          if [ -z "$APKSIGNER" ]; then
+            echo "::error::Apksigner não encontrado."
+            exit 1
+          fi
+
+          APK="$GITHUB_WORKSPACE/apk-final/LoveMix.apk"
+
+          "$APKSIGNER" verify "$APK"
+
+          CERTS="$("$APKSIGNER" verify --print-certs "$APK")"
+
+          SHA1="$(
+            printf '%s\n' "$CERTS" |
+            sed -n 's/.*certificate SHA-1 digest: //p' |
+            head -n 1
+          )"
+
+          SHA256="$(
+            printf '%s\n' "$CERTS" |
+            sed -n 's/.*certificate SHA-256 digest: //p' |
+            head -n 1
+          )"
+
+          if [ -z "$SHA1" ] || [ -z "$SHA256" ]; then
+            echo "::error::Certificados não encontrados."
+            exit 1
+          fi
+
+          echo "sha1=$SHA1" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+
+          echo "SHA-1: $SHA1"
+          echo "SHA-256: $SHA256"
+
+      - name: Publicar APK para download
+        uses: actions/upload-artifact@v4
+        with:
+          name: LoveMix-APK
+          path: apk-final/LoveMix.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Criar Release para download
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: lovemix-build-${{ github.run_number }}-${{ github.run_attempt }}
+          name: LoveMix APK - Build ${{ github.run_number }}
+          body: |
+            APK LoveMix compilado.
+
+            SHA-1:
+            ${{ steps.certificate.outputs.sha1 }}
+
+            SHA-256:
+            ${{ steps.certificate.outputs.sha256 }}
+          files: apk-final/LoveMix.apk
+          make_latest: true
+
+      - name: Mostrar download e SHA no Summary
+        if: always()
+        shell: bash
+        env:
+          SHA1: ${{ steps.certificate.outputs.sha1 }}
+          SHA256: ${{ steps.certificate.outputs.sha256 }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+
+          TAG="lovemix-build-${RUN_NUMBER}-${RUN_ATTEMPT}"
+
+          {
+            echo "# 💜 LoveMix"
+            echo ""
+            echo "## 🖤 DOWNLOAD DO APK"
+            echo ""
+            echo "[📥 BAIXAR LOVEMIX APK](https://github.com/${REPOSITORY}/releases/download/${TAG}/LoveMix.apk)"
+            echo ""
+            echo "[📦 ABRIR RELEASES](https://github.com/${REPOSITORY}/releases)"
+            echo ""
+            echo "[📥 ABRIR ARTIFACTS](https://github.com/${REPOSITORY}/actions/runs/${RUN_ID}#artifacts)"
+            echo ""
+            echo "## SHA-1"
+            echo ""
+            echo "${SHA1:-Não gerado}"
+            echo ""
+            echo "## SHA-256"
+            echo ""
+            echo "${SHA256:-Não gerado}"
+          } >> "$GITHUB_STEP_SUMMARY"
