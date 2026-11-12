@@ -30,27 +30,27 @@ jobs:
       - name: Baixar projeto do GitHub
         uses: actions/checkout@v4
 
-      # 2. Java
+      # 2. Instalar Java 17
       - name: Instalar Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      # 3. Flutter
+      # 3. Instalar Flutter
       - name: Instalar Flutter estável
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
-      # 4. Ferramentas
+      # 4. Instalar ferramentas
       - name: Instalar ferramentas
         run: |
           sudo apt-get update
           sudo apt-get install -y unzip zip curl jq file
 
-      # 5. Extrair ZIP e localizar projeto
+      # 5. Extrair e localizar projeto Flutter
       - name: Localizar projeto Flutter
         shell: bash
         run: |
@@ -58,37 +58,42 @@ jobs:
 
           mkdir -p extracted
 
-          if [ -f pubspec.yaml ]; then
+          if [ -f pubspec.yaml ] && [ -f lib/main.dart ]; then
             PROJECT_DIR="$GITHUB_WORKSPACE"
           else
-            ZIP_FILE="$(find . -maxdepth 1 -type f -iname '*.zip' | head -n 1)"
+            ZIP_FILE="$(find . -maxdepth 1 -type f -iname '*.zip' | sort -r | head -n 1)"
 
             if [ -z "$ZIP_FILE" ]; then
-              echo "ERRO: Nenhum ZIP encontrado."
+              echo "::error::Nenhum ZIP encontrado."
               exit 1
             fi
 
+            echo "Extraindo: $ZIP_FILE"
             unzip -q "$ZIP_FILE" -d extracted
 
             PUBSPEC="$(find extracted -type f -name pubspec.yaml \
-              -not -path '*/.dart_tool/*' | head -n 1)"
+              -not -path '*/.dart_tool/*' \
+              -not -path '*/build/*' | sort | head -n 1)"
 
             if [ -z "$PUBSPEC" ]; then
-              echo "ERRO: pubspec.yaml não encontrado."
+              echo "::error::pubspec.yaml não encontrado."
               exit 1
             fi
 
             PROJECT_DIR="$(dirname "$PUBSPEC")"
           fi
 
+          PROJECT_DIR="$(realpath "$PROJECT_DIR")"
+
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Projeto encontrado em: $PROJECT_DIR"
+          echo "Projeto encontrado: $PROJECT_DIR"
 
-          test -f "$PROJECT_DIR/pubspec.yaml"
+          test -s "$PROJECT_DIR/pubspec.yaml"
+          test -s "$PROJECT_DIR/lib/main.dart"
           test -d "$PROJECT_DIR/android"
 
-      # 6. Verificar estrutura Android
+      # 6. Verificar Android
       - name: Verificar arquivos Android
         shell: bash
         run: |
@@ -96,22 +101,34 @@ jobs:
 
           ANDROID_DIR="$PROJECT_DIR/android"
 
-          if [ ! -f "$ANDROID_DIR/settings.gradle" ] && \
-             [ ! -f "$ANDROID_DIR/settings.gradle.kts" ]; then
-            echo "ERRO: Configuração Android não encontrada."
-            exit 1
-          fi
+          test -f "$ANDROID_DIR/app/build.gradle" || \
+          test -f "$ANDROID_DIR/app/build.gradle.kts"
+
+          test -f "$ANDROID_DIR/settings.gradle" || \
+          test -f "$ANDROID_DIR/settings.gradle.kts"
 
           echo "Estrutura Android encontrada."
 
-      # 7. Preparar Gradle
-      - name: Preparar Gradle 9.3.1
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '9.3.1'
+      # 7. Instalar Gradle oficial 9.3.1
+      - name: Instalar Gradle 9.3.1 oficial
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      # 8. Gerar Gradle Wrapper
-      - name: Gerar Gradle Wrapper
+          curl --fail --location --retry 3 \
+            https://services.gradle.org/distributions/gradle-9.3.1-bin.zip \
+            --output /tmp/gradle-9.3.1-bin.zip
+
+          unzip -q /tmp/gradle-9.3.1-bin.zip -d /tmp
+
+          test -x /tmp/gradle-9.3.1/bin/gradle
+
+          /tmp/gradle-9.3.1/bin/gradle --version
+
+          echo "GRADLE_931=/tmp/gradle-9.3.1/bin/gradle" >> "$GITHUB_ENV"
+
+      # 8. Gerar Wrapper na pasta correta
+      - name: Gerar Gradle Wrapper 9.3.1
         shell: bash
         run: |
           set -euo pipefail
@@ -119,53 +136,104 @@ jobs:
           ANDROID_DIR="$PROJECT_DIR/android"
           TEMP_WRAPPER="$(mktemp -d)"
 
-          mkdir -p "$TEMP_WRAPPER"
-
           cd "$TEMP_WRAPPER"
 
-          printf "rootProject.name = 'wrapper-bootstrap'\n" > settings.gradle
-          printf "plugins {}\n" > build.gradle
+          printf "rootProject.name = 'lovemix-wrapper'\n" > settings.gradle
+          printf "tasks.register('lovemixBootstrap')\n" > build.gradle
 
-          gradle wrapper \
+          "$GRADLE_931" --no-daemon wrapper \
             --gradle-version 9.3.1 \
             --distribution-type bin
 
           mkdir -p "$ANDROID_DIR/gradle/wrapper"
 
           install -m 0755 gradlew "$ANDROID_DIR/gradlew"
+
           install -m 0644 gradlew.bat "$ANDROID_DIR/gradlew.bat"
 
           install -m 0644 \
             gradle/wrapper/gradle-wrapper.jar \
             "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.jar"
 
-          install -m 0644 \
-            gradle/wrapper/gradle-wrapper.properties \
-            "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.properties"
+          cat > "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.properties" <<'PROPERTIES'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-9.3.1-bin.zip
+          networkTimeout=120000
+          validateDistributionUrl=true
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          PROPERTIES
 
           chmod 755 "$ANDROID_DIR/gradlew"
 
+          test -s "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.jar"
           test -x "$ANDROID_DIR/gradlew"
-          test -f "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.jar"
 
-          echo "Gradle Wrapper gerado com sucesso."
+          echo "Wrapper 9.3.1 criado."
 
-      # 9. Corrigir permissão do Gradle
-      - name: Corrigir permissão do Gradle
+      # 9. Configurar compatibilidade Android e Kotlin
+      - name: Configurar AGP 9.1.1 e Kotlin
         shell: bash
         run: |
           set -euo pipefail
 
-          chmod +x "$PROJECT_DIR/android/gradlew"
+          SETTINGS="$PROJECT_DIR/android/settings.gradle"
 
-          if [ ! -x "$PROJECT_DIR/android/gradlew" ]; then
-            echo "ERRO: Gradle sem permissão de execução."
-            exit 1
+          if [ ! -f "$SETTINGS" ]; then
+            SETTINGS="$PROJECT_DIR/android/settings.gradle.kts"
           fi
 
-          ls -l "$PROJECT_DIR/android/gradlew"
+          test -f "$SETTINGS"
 
-          echo "Permissão de execução confirmada."
+          python3 - "$SETTINGS" "$PROJECT_DIR/android/gradle.properties" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          settings = Path(sys.argv[1])
+          props = Path(sys.argv[2])
+
+          content = settings.read_text()
+
+          replacements = [
+              (
+                  r'(id\s+["\']com\.android\.application["\']\s+version\s+["\'])[^"\']+(["\'])',
+                  r'\g<1>9.1.1\g<2>'
+              ),
+              (
+                  r'(id\s+["\']org\.jetbrains\.kotlin\.android["\']\s+version\s+["\'])[^"\']+(["\'])',
+                  r'\g<1>2.2.20\g<2>'
+              ),
+          ]
+
+          for pattern, replacement in replacements:
+              content, count = re.subn(pattern, replacement, content)
+              if count == 0 and "com.android.application" in pattern:
+                  if not re.search(r'com\.android\.application.*version.*9\.1\.1', content, re.S):
+                      raise SystemExit("Não foi possível configurar AGP 9.1.1.")
+              if count == 0 and "org.jetbrains.kotlin.android" in pattern:
+                  if not re.search(r'org\.jetbrains\.kotlin\.android.*version.*2\.2\.20', content, re.S):
+                      raise SystemExit("Não foi possível configurar Kotlin 2.2.20.")
+
+          settings.write_text(content)
+
+          p = props.read_text() if props.exists() else ""
+
+          if re.search(r'(?m)^android\.builtInKotlin\s*=', p):
+              p = re.sub(
+                  r'(?m)^android\.builtInKotlin\s*=.*$',
+                  'android.builtInKotlin=false',
+                  p
+              )
+          else:
+              p = p.rstrip() + '\nandroid.builtInKotlin=false\n'
+
+          props.write_text(p)
+
+          print("AGP 9.1.1 e Kotlin 2.2.20 configurados.")
+          print("android.builtInKotlin=false aplicado.")
+          PY
 
       # 10. Preparar cache
       - name: Preparar cache Gradle
@@ -179,33 +247,69 @@ jobs:
             lovemix-gradle-${{ runner.os }}-
 
       # 11. Verificar ambiente
-      - name: Verificar Java e Flutter
+      - name: Verificar Java Flutter e Gradle
+        shell: bash
         run: |
+          set -euo pipefail
+
           java -version
           flutter --version
-          gradle --version
+          "$GRADLE_931" --version
 
       # 12. Baixar dependências
       - name: Baixar dependências Flutter
         working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
         run: |
           set -euo pipefail
           flutter pub get
 
-      # 13. Verificar Gradle
-      - name: Verificar Gradle
+      # 13. Fixar Wrapper no projeto
+      - name: Fixar Gradle 9.3.1
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p android/gradle/wrapper
+
+          cat > android/gradle/wrapper/gradle-wrapper.properties <<'PROPERTIES'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-9.3.1-bin.zip
+          networkTimeout=120000
+          validateDistributionUrl=true
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          PROPERTIES
+
+          chmod 755 android/gradlew
+
+          grep -F 'gradle-9.3.1-bin.zip' \
+            android/gradle/wrapper/gradle-wrapper.properties
+
+          bash android/gradlew --version | tee /tmp/gradle-check.txt
+
+          grep -q 'Gradle 9.3.1' /tmp/gradle-check.txt
+
+          echo "Gradle correto confirmado."
+
+      # 14. Verificar Gradle Android
+      - name: Verificar Gradle Android
         working-directory: ${{ env.PROJECT_DIR }}/android
         shell: bash
         run: |
           set -euo pipefail
 
-          chmod +x gradlew
+          chmod 755 gradlew
 
-          bash ./gradlew --version
+          ./gradlew --version | tee /tmp/gradle-android.txt
 
-          echo "Gradle funcionando corretamente."
+          grep -q 'Gradle 9.3.1' /tmp/gradle-android.txt
 
-      # 14. Compilar APK
+          echo "Gradle Android validado."
+
+      # 15. Compilar APK Release
       - name: Compilar APK Release
         id: build_apk
         working-directory: ${{ env.PROJECT_DIR }}
@@ -213,15 +317,35 @@ jobs:
         run: |
           set -euo pipefail
 
-          chmod +x android/gradlew
+          echo "Projeto: $PWD"
+
+          # Proteção contra Wrapper antigo.
+          cat > android/gradle/wrapper/gradle-wrapper.properties <<'PROPERTIES'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-9.3.1-bin.zip
+          networkTimeout=120000
+          validateDistributionUrl=true
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          PROPERTIES
+
+          chmod 755 android/gradlew
+
+          bash android/gradlew --version | tee /tmp/gradle-final.txt
+
+          if ! grep -q 'Gradle 9.3.1' /tmp/gradle-final.txt; then
+            echo "::error::Gradle incorreto. Build cancelado."
+            exit 1
+          fi
 
           flutter build apk --release
 
           APK="$(find build/app/outputs/flutter-apk \
-            -type f -name '*.apk' | head -n 1)"
+            -type f -name '*.apk' | sort | head -n 1)"
 
           if [ -z "$APK" ]; then
-            echo "ERRO: APK não encontrado."
+            echo "::error::APK não encontrado."
             exit 1
           fi
 
@@ -233,10 +357,11 @@ jobs:
 
           test -s "$GITHUB_WORKSPACE/dist/LoveMix-release.apk"
 
-          echo "APK compilado com sucesso."
+          echo "APK gerado com sucesso."
 
-      # 15. Validar APK
+      # 16. Validar APK
       - name: Validar APK
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -246,9 +371,9 @@ jobs:
 
           file "$APK"
 
-          echo "APK válido e pronto para publicação."
+          echo "APK válido."
 
-      # 16. Calcular SHA-1 e SHA-256
+      # 17. Calcular SHA-1 e SHA-256
       - name: Verificar SHA-1 e SHA-256
         id: hashes
         shell: bash
@@ -266,20 +391,27 @@ jobs:
           echo "SHA-1: $SHA1"
           echo "SHA-256: $SHA256"
 
-          APKSIGNER="$(find "$ANDROID_HOME/build-tools" \
-            -type f -name apksigner | sort -V | tail -n 1)"
+          SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          APKSIGNER=""
+
+          if [ -n "$SDK_DIR" ] && [ -d "$SDK_DIR/build-tools" ]; then
+            APKSIGNER="$(find "$SDK_DIR/build-tools" \
+              -type f -name apksigner | sort -V | tail -n 1 || true)"
+          fi
+
+          CERT_SHA1=""
+          CERT_SHA256=""
 
           if [ -n "$APKSIGNER" ]; then
             CERT_INFO="$("$APKSIGNER" verify --print-certs "$APK" 2>&1 || true)"
 
             CERT_SHA1="$(echo "$CERT_INFO" | \
-              sed -n 's/.*certificate SHA-1 digest: //p' | head -n 1)"
+              sed -n 's/.*certificate SHA-1 digest: *//p' | head -n 1)"
 
             CERT_SHA256="$(echo "$CERT_INFO" | \
-              sed -n 's/.*certificate SHA-256 digest: //p' | head -n 1)"
+              sed -n 's/.*certificate SHA-256 digest: *//p' | head -n 1)"
           else
-            CERT_SHA1=""
-            CERT_SHA256=""
+            echo "::warning::apksigner não encontrado."
           fi
 
           echo "cert_sha1=$CERT_SHA1" >> "$GITHUB_OUTPUT"
@@ -303,16 +435,20 @@ jobs:
             echo "${CERT_SHA256:-Não disponível}"
           } > dist/CHECKSUMS.txt
 
-      # 17. Preparar Release
+      # 18. Preparar Release
       - name: Preparar Release
         id: release_meta
+        shell: bash
         run: |
+          set -euo pipefail
+
           TAG="lovemix-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
 
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
           echo "release_name=LoveMix ${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
 
-      # 18. Publicar artefatos
+      # 19. Publicar APK
       - name: Publicar APK para download
         uses: actions/upload-artifact@v4
         with:
@@ -323,7 +459,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # 19. Criar Release
+      # 20. Criar Release
       - name: Criar Release para download
         uses: softprops/action-gh-release@v2
         with:
@@ -334,9 +470,8 @@ jobs:
 
             APK Release compilado automaticamente.
 
-            SHA-1 e SHA-256 disponíveis no arquivo CHECKSUMS.txt.
+            SHA-1 e SHA-256 disponíveis em CHECKSUMS.txt.
 
-            Download disponível nos arquivos desta Release.
           files: |
             dist/LoveMix-release.apk
             dist/CHECKSUMS.txt
@@ -344,7 +479,7 @@ jobs:
           prerelease: false
           fail_on_unmatched_files: true
 
-      # 20. Summary roxo e preto
+      # 21. Summary roxo e preto
       - name: Mostrar download e SHA no Summary
         if: success()
         env:
@@ -355,6 +490,8 @@ jobs:
           RELEASE_TAG: ${{ steps.release_meta.outputs.tag }}
         shell: bash
         run: |
+          set -euo pipefail
+
           RELEASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}"
 
           {
@@ -368,24 +505,24 @@ jobs:
             echo '<a href="'$RELEASE_URL'">💜 BAIXAR APK LOVEMIX</a>'
             echo '<br><br>'
             echo '<a href="'$RELEASE_URL'">Abrir Release e baixar arquivos</a>'
-            echo '<h2>🔐 SHA-1 e SHA-256 do APK</h2>'
-            echo '<b>SHA-1:</b>'
+            echo '<h2>🔐 SHA-1 e SHA-256</h2>'
+            echo '<b>SHA-1 do arquivo:</b>'
             echo
             echo '```text'
             echo "$APK_SHA1"
             echo '```'
-            echo '<b>SHA-256:</b>'
+            echo '<b>SHA-256 do arquivo:</b>'
             echo
             echo '```text'
             echo "$APK_SHA256"
             echo '```'
-            echo '<h2>📱 Certificado de assinatura</h2>'
-            echo '<b>SHA-1 do certificado:</b>'
+            echo '<h2>📱 Certificado</h2>'
+            echo '<b>SHA-1:</b>'
             echo
             echo '```text'
             echo "${CERT_SHA1:-Não disponível}"
             echo '```'
-            echo '<b>SHA-256 do certificado:</b>'
+            echo '<b>SHA-256:</b>'
             echo
             echo '```text'
             echo "${CERT_SHA256:-Não disponível}"
