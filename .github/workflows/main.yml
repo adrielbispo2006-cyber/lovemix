@@ -49,7 +49,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t ZIPS < <(find . -maxdepth 1 -type f -iname '*.zip' | sort)
+          mapfile -t ZIPS < <( find . -maxdepth 1 -type f -iname '*.zip' | sort )
           if [ "${#ZIPS[@]}" -ne 1 ]; then
             echo "::error::Deixe somente um ZIP na raiz do repositorio."
             exit 1
@@ -57,7 +57,6 @@ jobs:
           unzip -t "${ZIPS[0]}"
           mkdir -p extracted
           unzip -q "${ZIPS[0]}" -d extracted
-          echo "ZIP extraido com sucesso."
 
       - name: Localizar projeto Flutter
         shell: bash
@@ -70,8 +69,7 @@ jobs:
               PROJECT_DIR="$DIR"
               break
             fi
-          done < <(find extracted -type f -name pubspec.yaml -print0)
-          
+          done < <( find extracted -type f -name pubspec.yaml -print0 )
           if [ -z "$PROJECT_DIR" ]; then
             echo "::error::Projeto Flutter nao encontrado."
             exit 1
@@ -101,18 +99,17 @@ jobs:
           chmod +x android/gradlew
           echo "Arquivos principais encontrados."
 
-      - name: Configurar ambiente Gradle 8.14.3
+      - name: Configurar Gradle 8.14.3
         shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR/android"
-          if ! grep -Fq 'GRADLE_VERSION=8.14.3' gradlew; then
-            echo "::error::O gradlew nao utiliza Gradle 8.14.3."
+          if ! grep -Fq '8.14.3' gradlew; then
+            echo "::error::Gradle 8.14.3 nao identificado no gradlew."
             exit 1
           fi
           chmod +x gradlew
-          echo "Wrapper personalizado identificado."
-          echo "Versao esperada: Gradle 8.14.3"
+          echo "Gradle 8.14.3 identificado."
 
       - name: Verificar versão real do Gradle
         shell: bash
@@ -123,14 +120,10 @@ jobs:
           echo "GRADLE_USER_HOME=$GRADLE_USER_HOME" >> "$GITHUB_ENV"
           cd "$PROJECT_DIR/android"
           ./gradlew --no-daemon --version
-          VERSION="$(./gradlew --no-daemon --version | grep -m1 '^Gradle ' | awk '{print $2}')"
+          VERSION="$( ./gradlew --no-daemon --version | grep -m1 '^Gradle ' | awk '{print $2}' )"
           echo "Versao encontrada: $VERSION"
           if [ "$VERSION" != "8.14.3" ]; then
             echo "::error::Esperado Gradle 8.14.3."
             exit 1
           fi
-          echo "Gradle 8.14.3 confirmado."
-
-      - name: Configurar Android
-        shell: bash
-        
+          echo "Gradle confirmado."
