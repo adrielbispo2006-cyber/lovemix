@@ -1,13 +1,14 @@
+
 name: Gerar APK LoveMix
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
     paths:
       - '*.zip'
       - '.github/workflows/**'
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -23,7 +24,7 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Baixar arquivos do GitHub
+      - name: Baixar projeto
         uses: actions/checkout@v4
 
       - name: Instalar Java 17
@@ -32,7 +33,7 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Instalar Flutter estável
+      - name: Instalar Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
@@ -51,13 +52,11 @@ jobs:
           mapfile -t ZIPS < <(find . -maxdepth 1 -type f -iname '*.zip' | sort)
 
           if [ "${#ZIPS[@]}" -ne 1 ]; then
-            echo "::error::Deixe somente um ZIP na raiz. Encontrados: ${#ZIPS[@]}"
-            printf '%s\n' "${ZIPS[@]}"
+            echo "::error::Deixe somente um ZIP na raiz do GitHub."
             exit 1
           fi
 
           unzip -t "${ZIPS[0]}"
-
           mkdir -p extracted
           unzip -q "${ZIPS[0]}" -d extracted
 
@@ -83,7 +82,7 @@ jobs:
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Projeto localizado: $PROJECT_DIR"
+          echo "Projeto encontrado: $PROJECT_DIR"
 
       - name: Verificar arquivos obrigatórios
         shell: bash
@@ -92,79 +91,60 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          for FILE in \
-            pubspec.yaml \
-            lib/main.dart \
-            android/gradlew \
-            android/gradle/wrapper/gradle-wrapper.properties \
-            android/app/src/main/AndroidManifest.xml
-          do
-            if [ ! -s "$FILE" ]; then
-              echo "::error::Arquivo ausente: $FILE"
-              exit 1
-            fi
-          done
+          test -s pubspec.yaml
+          test -s lib/main.dart
+          test -s android/gradlew
+          test -s android/gradle/wrapper/gradle-wrapper.properties
+          test -s android/app/src/main/AndroidManifest.xml
 
           chmod +x android/gradlew
 
-      - name: Corrigir todos os arquivos Gradle Wrapper
+      - name: Atualizar Gradle Wrapper
         shell: bash
         run: |
           set -euo pipefail
 
-          cd "$PROJECT_DIR"
+          WRAPPER="$PROJECT_DIR/android/gradle/wrapper/gradle-wrapper.properties"
 
-          mapfile -t WRAPPERS < <(
-            find android -type f -name gradle-wrapper.properties
-          )
+          cat > "$WRAPPER" <<'EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-9.3.1-bin.zip
+          networkTimeout=120000
+          validateDistributionUrl=true
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
 
-          if [ "${#WRAPPERS[@]}" -eq 0 ]; then
-            echo "::error::Gradle Wrapper não encontrado."
-            exit 1
-          fi
+          echo "Conferindo arquivo Gradle:"
+          cat "$WRAPPER"
 
-          for WRAPPER in "${WRAPPERS[@]}"; do
-            cat > "$WRAPPER" <<'EOF'
-distributionBase=GRADLE_USER_HOME
-distributionPath=wrapper/dists
-distributionUrl=https\://services.gradle.org/distributions/gradle-9.3.1-bin.zip
-networkTimeout=120000
-validateDistributionUrl=true
-zipStoreBase=GRADLE_USER_HOME
-zipStorePath=wrapper/dists
-EOF
+          grep -q 'gradle-9.3.1-bin.zip' "$WRAPPER"
 
-            echo "Arquivo corrigido: $WRAPPER"
-            cat "$WRAPPER"
-
-            grep -q 'gradle-9.3.1-bin.zip' "$WRAPPER"
-          done
-
-          chmod +x android/gradlew
-
-      - name: Verificar versão real do Gradle
+      - name: Confirmar versão do Gradle
         shell: bash
         run: |
           set -euo pipefail
 
           cd "$PROJECT_DIR/android"
 
-          echo "Verificando Gradle Wrapper..."
+          chmod +x gradlew
 
+          echo "Executando Gradle Wrapper:"
           ./gradlew --version
 
           VERSION="$(./gradlew --version | grep -m1 '^Gradle ' | awk '{print $2}')"
 
-          echo "Versão encontrada: $VERSION"
+          echo "Versão detectada: $VERSION"
 
           if [ "$VERSION" != "9.3.1" ]; then
-            echo "::error::Gradle incorreto: $VERSION. Esperado: 9.3.1"
+            echo "::error::A versão do Gradle não é 9.3.1."
             exit 1
           fi
 
-          echo "Gradle 9.3.1 confirmado."
+          echo "Gradle correto confirmado."
 
-      - name: Permitir compileSdk 37
+      - name: Configurar Android
         shell: bash
         run: |
           set -euo pipefail
@@ -177,7 +157,7 @@ EOF
             echo 'android.suppressUnsupportedCompileSdk=37' >> android/gradle.properties
           fi
 
-      - name: Configurar assinatura fixa do APK
+      - name: Configurar assinatura
         shell: bash
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -191,8 +171,7 @@ EOF
              [ -z "${ANDROID_KEYSTORE_PASSWORD:-}" ] || \
              [ -z "${ANDROID_KEY_ALIAS:-}" ] || \
              [ -z "${ANDROID_KEY_PASSWORD:-}" ]; then
-
-            echo "::warning::Secrets de assinatura não configurados. Será utilizada a chave debug."
+            echo "::warning::Assinatura fixa não configurada. Será usada a assinatura debug."
             exit 0
           fi
 
@@ -209,39 +188,32 @@ EOF
           echo "ANDROID_KEY_PASSWORD=$ANDROID_KEY_PASSWORD" >> "$GITHUB_ENV"
 
       - name: Verificar ambiente
-        shell: bash
         run: |
           flutter --version
           java -version
 
-      - name: Baixar dependências Flutter
+      - name: Baixar dependências
         shell: bash
         run: |
           set -euo pipefail
-
           cd "$PROJECT_DIR"
-
           flutter pub get
 
-      - name: Analisar código Flutter
+      - name: Analisar Flutter
         shell: bash
         run: |
           set -euo pipefail
-
           cd "$PROJECT_DIR"
-
           flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings
 
       - name: Compilar APK Release
         shell: bash
         run: |
           set -euo pipefail
-
           cd "$PROJECT_DIR"
-
           flutter build apk --release
 
-      - name: Localizar e validar APK
+      - name: Validar APK
         shell: bash
         run: |
           set -euo pipefail
@@ -249,7 +221,7 @@ EOF
           APK="$PROJECT_DIR/build/app/outputs/flutter-apk/app-release.apk"
 
           if [ ! -s "$APK" ]; then
-            echo "::error::APK não encontrado ou vazio."
+            echo "::error::APK não foi gerado."
             exit 1
           fi
 
@@ -257,10 +229,9 @@ EOF
 
           cp "$APK" "$GITHUB_WORKSPACE/apk-final/LoveMix.apk"
 
-          echo "APK encontrado:"
           ls -lh "$GITHUB_WORKSPACE/apk-final/LoveMix.apk"
 
-      - name: Mostrar SHA-1 e SHA-256 do certificado
+      - name: Verificar certificado
         shell: bash
         run: |
           set -euo pipefail
@@ -281,13 +252,8 @@ EOF
 
           CERTS="$("$APKSIGNER" verify --print-certs "$GITHUB_WORKSPACE/apk-final/LoveMix.apk")"
 
-          fmt() {
-            echo "$1" | tr 'a-f' 'A-F' | sed 's/../&:/g; s/:$//'
-          }
-
-          SHA1="$(fmt "$(echo "$CERTS" | grep -m1 'certificate SHA-1 digest' | awk '{print $NF}')")"
-
-          SHA256="$(fmt "$(echo "$CERTS" | grep -m1 'certificate SHA-256 digest' | awk '{print $NF}')")"
+          SHA1="$(echo "$CERTS" | grep -m1 'certificate SHA-1 digest' | awk '{print $NF}')"
+          SHA256="$(echo "$CERTS" | grep -m1 'certificate SHA-256 digest' | awk '{print $NF}')"
 
           {
             echo "## Certificado LoveMix"
@@ -297,9 +263,6 @@ EOF
             echo "SHA-256: $SHA256"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          echo "SHA-1: $SHA1"
-          echo "SHA-256: $SHA256"
-
       - name: Enviar APK para download
         uses: actions/upload-artifact@v4
         with:
@@ -307,4 +270,3 @@ EOF
           path: apk-final/LoveMix.apk
           if-no-files-found: error
           retention-days: 14
-
