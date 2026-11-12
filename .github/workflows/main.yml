@@ -37,22 +37,44 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # 3. Flutter
+      # 3. Flutter estável
       - name: Instalar Flutter estável
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
-      # 4      - name: Instalar Android SDK
+      # 4. Android SDK
+      # CORREÇÃO: não instalar o pacote antigo "tools"
+      - name: Instalar Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
 
+      # 5. Preparar SDK 35
       - name: Preparar Android SDK
+        shell: bash
         run: |
-          sdkmanager --install "platform-tools"
-          sdkmanager --install "platforms;android-35"
-          sdkmanager --install "build-tools;35.0.0"
-          yes | sdkmanager --licenses|| true
+          set -euo pipefail
+
+          echo "Preparando Android SDK..."
+
+          SDKMANAGER="$(command -v sdkmanager || true)"
+
+          if [[ -z "$SDKMANAGER" ]]; then
+            SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" \
+              -type f -name sdkmanager | sort -V | tail -n 1)"
+          fi
+
+          if [[ -z "$SDKMANAGER" || ! -f "$SDKMANAGER" ]]; then
+            echo "::error::SDK Manager não encontrado."
+            exit 1
+          fi
+
+          echo "Aceitando licenças..."
+
+          set +o pipefail
+          yes | "$SDKMANAGER" --licenses || true
           set -o pipefail
 
           echo "Instalando Android SDK 35..."
@@ -62,7 +84,7 @@ jobs:
             "build-tools;35.0.0" \
             "platform-tools"
 
-          echo "Verificando Android SDK..."
+          echo "Validando SDK..."
 
           test -d "$ANDROID_HOME/platforms/android-35"
           test -d "$ANDROID_HOME/build-tools/35.0.0"
@@ -96,7 +118,7 @@ jobs:
               exit 1
             fi
 
-            echo "Extraindo projeto: $ZIP_FILE"
+            echo "Extraindo: $ZIP_FILE"
 
             unzip -q "$ZIP_FILE" -d "$GITHUB_WORKSPACE/extracted"
 
@@ -128,7 +150,7 @@ jobs:
 
           echo "Projeto localizado: $PROJECT_DIR"
 
-      # 8. Corrigir compileSdk
+      # 8. Corrigir compileSdk 35
       - name: Corrigir compileSdk para Android 35
         shell: bash
         run: |
@@ -214,10 +236,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Android SDK:"
-          echo "$ANDROID_HOME"
+          echo "Android SDK: $ANDROID_HOME"
 
-          echo "Plataformas instaladas:"
+          echo "Plataformas:"
           ls "$ANDROID_HOME/platforms"
 
           test -d "$ANDROID_HOME/platforms/android-35"
@@ -227,7 +248,7 @@ jobs:
 
           test -d "$ANDROID_HOME/build-tools/35.0.0"
 
-          echo "SDK validado."
+          echo "SDK validado!"
 
       # 10. Cache Gradle
       - name: Preparar cache Gradle
@@ -240,7 +261,7 @@ jobs:
           restore-keys: |
             lovemix-gradle-${{ runner.os }}-
 
-      # 11. Assinatura persistente opcional
+      # 11. Assinatura persistente
       - name: Configurar assinatura persistente
         shell: bash
         env:
@@ -253,7 +274,7 @@ jobs:
 
           if [[ -z "$KEYSTORE_BASE64" ]]; then
             echo "Keystore não configurado."
-            echo "Será utilizada a assinatura configurada no projeto."
+            echo "Utilizando assinatura configurada no projeto."
             exit 0
           fi
 
@@ -327,7 +348,7 @@ jobs:
           print("Verificação ZEGO concluída.")
           PY
 
-      # 14. Validar Java e Flutter
+      # 14. Validar Java Flutter e Gradle
       - name: Validar Java Flutter e Gradle
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
@@ -352,7 +373,7 @@ jobs:
 
           echo "Ambiente validado."
 
-      # 15. Compilar APK
+      # 15. Compilar APK Release
       - name: Compilar APK Release
         id: build_apk
         working-directory: ${{ env.PROJECT_DIR }}
@@ -402,7 +423,7 @@ jobs:
 
           echo "APK validado."
 
-      # 17. Calcular SHA-1 e SHA-256
+      # 17. SHA-1 e SHA-256
       - name: Calcular SHA-1 SHA-256 e fingerprints
         id: hashes
         shell: bash
@@ -414,17 +435,13 @@ jobs:
           FILE_SHA1="$(sha1sum "$APK" | awk '{print $1}')"
           FILE_SHA256="$(sha256sum "$APK" | awk '{print $1}')"
 
-          APKSIGNER=""
-
-          if [[ -n "${ANDROID_HOME:-}" && -d "$ANDROID_HOME/build-tools" ]]; then
-            APKSIGNER="$(find "$ANDROID_HOME/build-tools" \
-              -type f -name apksigner | sort -V | tail -n 1 || true)"
-          fi
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" \
+            -type f -name apksigner | sort -V | tail -n 1)"
 
           CERT_SHA1="Não disponível"
           CERT_SHA256="Não disponível"
 
-          if [[ -n "$APKSIGNER" ]]; then
+          if [[ -n "$APKSIGNER" && -f "$APKSIGNER" ]]; then
 
             CERT_INFO="$("$APKSIGNER" verify --print-certs "$APK" 2>&1 || true)"
 
@@ -503,6 +520,7 @@ jobs:
             APK Release compilado automaticamente.
 
             Android SDK: 35.
+            Java: 17.
 
             SHA-1 e SHA-256 do APK e certificado em CHECKSUMS.txt.
           files: |
