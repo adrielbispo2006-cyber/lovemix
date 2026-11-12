@@ -48,7 +48,7 @@ jobs:
       - name: Instalar ferramentas
         run: |
           sudo apt-get update
-          sudo apt-get install -y unzip zip curl jq
+          sudo apt-get install -y unzip zip curl jq file
 
       # 5. Extrair ZIP e localizar projeto
       - name: Localizar projeto Flutter
@@ -90,6 +90,7 @@ jobs:
 
       # 6. Verificar estrutura Android
       - name: Verificar arquivos Android
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -109,7 +110,7 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      # 8. Gerar Wrapper corretamente
+      # 8. Gerar Gradle Wrapper
       - name: Gerar Gradle Wrapper
         shell: bash
         run: |
@@ -129,7 +130,6 @@ jobs:
             --gradle-version 9.3.1 \
             --distribution-type bin
 
-          # Criar os diretórios antes de copiar
           mkdir -p "$ANDROID_DIR/gradle/wrapper"
 
           install -m 0755 gradlew "$ANDROID_DIR/gradlew"
@@ -143,14 +143,31 @@ jobs:
             gradle/wrapper/gradle-wrapper.properties \
             "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.properties"
 
-          chmod +x "$ANDROID_DIR/gradlew"
+          chmod 755 "$ANDROID_DIR/gradlew"
 
-          test -f "$ANDROID_DIR/gradlew"
+          test -x "$ANDROID_DIR/gradlew"
           test -f "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.jar"
 
-          echo "Gradle Wrapper configurado corretamente."
+          echo "Gradle Wrapper gerado com sucesso."
 
-      # 9. Preparar cache
+      # 9. Corrigir permissão do Gradle
+      - name: Corrigir permissão do Gradle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          chmod +x "$PROJECT_DIR/android/gradlew"
+
+          if [ ! -x "$PROJECT_DIR/android/gradlew" ]; then
+            echo "ERRO: Gradle sem permissão de execução."
+            exit 1
+          fi
+
+          ls -l "$PROJECT_DIR/android/gradlew"
+
+          echo "Permissão de execução confirmada."
+
+      # 10. Preparar cache
       - name: Preparar cache Gradle
         uses: actions/cache@v4
         with:
@@ -161,33 +178,42 @@ jobs:
           restore-keys: |
             lovemix-gradle-${{ runner.os }}-
 
-      # 10. Verificar ambiente
+      # 11. Verificar ambiente
       - name: Verificar Java e Flutter
         run: |
           java -version
           flutter --version
           gradle --version
 
-      # 11. Baixar dependências
+      # 12. Baixar dependências
       - name: Baixar dependências Flutter
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -euo pipefail
           flutter pub get
 
-      # 12. Verificar configuração Gradle
+      # 13. Verificar Gradle
       - name: Verificar Gradle
         working-directory: ${{ env.PROJECT_DIR }}/android
+        shell: bash
         run: |
           set -euo pipefail
-          ./gradlew --version
 
-      # 13. Compilar APK
+          chmod +x gradlew
+
+          bash ./gradlew --version
+
+          echo "Gradle funcionando corretamente."
+
+      # 14. Compilar APK
       - name: Compilar APK Release
         id: build_apk
         working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
         run: |
           set -euo pipefail
+
+          chmod +x android/gradlew
 
           flutter build apk --release
 
@@ -207,7 +233,9 @@ jobs:
 
           test -s "$GITHUB_WORKSPACE/dist/LoveMix-release.apk"
 
-      # 14. Verificar APK
+          echo "APK compilado com sucesso."
+
+      # 15. Validar APK
       - name: Validar APK
         run: |
           set -euo pipefail
@@ -220,9 +248,10 @@ jobs:
 
           echo "APK válido e pronto para publicação."
 
-      # 15. Calcular SHA-1 e SHA-256
+      # 16. Calcular SHA-1 e SHA-256
       - name: Verificar SHA-1 e SHA-256
         id: hashes
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -234,10 +263,9 @@ jobs:
           echo "apk_sha1=$SHA1" >> "$GITHUB_OUTPUT"
           echo "apk_sha256=$SHA256" >> "$GITHUB_OUTPUT"
 
-          echo "SHA-1 do arquivo: $SHA1"
-          echo "SHA-256 do arquivo: $SHA256"
+          echo "SHA-1: $SHA1"
+          echo "SHA-256: $SHA256"
 
-          # Identificar certificado de assinatura
           APKSIGNER="$(find "$ANDROID_HOME/build-tools" \
             -type f -name apksigner | sort -V | tail -n 1)"
 
@@ -275,7 +303,7 @@ jobs:
             echo "${CERT_SHA256:-Não disponível}"
           } > dist/CHECKSUMS.txt
 
-      # 16. Preparar Release
+      # 17. Preparar Release
       - name: Preparar Release
         id: release_meta
         run: |
@@ -284,7 +312,7 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "release_name=LoveMix ${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
 
-      # 17. Publicar artefatos
+      # 18. Publicar artefatos
       - name: Publicar APK para download
         uses: actions/upload-artifact@v4
         with:
@@ -295,7 +323,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # 18. Criar Release
+      # 19. Criar Release
       - name: Criar Release para download
         uses: softprops/action-gh-release@v2
         with:
@@ -316,7 +344,7 @@ jobs:
           prerelease: false
           fail_on_unmatched_files: true
 
-      # 19. Summary roxo e preto
+      # 20. Summary roxo e preto
       - name: Mostrar download e SHA no Summary
         if: success()
         env:
@@ -325,6 +353,7 @@ jobs:
           CERT_SHA1: ${{ steps.hashes.outputs.cert_sha1 }}
           CERT_SHA256: ${{ steps.hashes.outputs.cert_sha256 }}
           RELEASE_TAG: ${{ steps.release_meta.outputs.tag }}
+        shell: bash
         run: |
           RELEASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}"
 
