@@ -55,7 +55,7 @@ jobs:
           )
 
           if [ "${#ZIPS[@]}" -ne 1 ]; then
-            echo "::error::Deixe somente um ZIP na raiz."
+            echo "::error::Deixe somente um ZIP na raiz do repositorio."
             exit 1
           fi
 
@@ -83,13 +83,15 @@ jobs:
           )
 
           if [ -z "$PROJECT_DIR" ]; then
-            echo "::error::Projeto Flutter não encontrado."
+            echo "::error::Projeto Flutter nao encontrado."
             exit 1
           fi
 
+          PROJECT_DIR="$(realpath "$PROJECT_DIR")"
+
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Projeto: $PROJECT_DIR"
+          echo "Projeto localizado: $PROJECT_DIR"
 
       - name: Verificar arquivos do projeto
         shell: bash
@@ -110,13 +112,14 @@ jobs:
             fi
           done
 
-          echo "Arquivos encontrados."
+          echo "Arquivos principais encontrados."
 
       - name: Gerar Gradle Wrapper automaticamente
         shell: bash
         run: |
           set -euo pipefail
 
+          PROJECT_DIR="$(realpath "$PROJECT_DIR")"
           TARGET="$PROJECT_DIR/android"
           WRAPPER_DIR="$TARGET/gradle/wrapper"
           TEMP_DIR="$RUNNER_TEMP/lovemix-wrapper"
@@ -135,7 +138,6 @@ jobs:
           import sys
 
           path = pathlib.Path(sys.argv[1])
-
           version = "8.14.3"
 
           if path.is_file():
@@ -164,7 +166,7 @@ jobs:
           GRADLE="$DOWNLOAD_DIR/gradle-${VERSION}/bin/gradle"
 
           if [ ! -x "$GRADLE" ]; then
-            echo "::error::Executável Gradle não encontrado."
+            echo "::error::Executavel Gradle nao encontrado."
             exit 1
           fi
 
@@ -179,22 +181,31 @@ jobs:
             --gradle-version "$VERSION" \
             --distribution-type bin
 
-          test -s gradlew
-          test -s gradle/wrapper/gradle-wrapper.jar
-          test -s gradle/wrapper/gradle-wrapper.properties
+          test -s "$TEMP_DIR/gradlew"
+          test -s "$TEMP_DIR/gradle/wrapper/gradle-wrapper.jar"
+          test -s "$TEMP_DIR/gradle/wrapper/gradle-wrapper.properties"
 
-          cp gradlew "$TARGET/gradlew"
-          cp gradlew.bat "$TARGET/gradlew.bat"
+          mkdir -p "$TARGET/gradle/wrapper"
 
-          cp gradle/wrapper/gradle-wrapper.jar \
-            "$WRAPPER_DIR/gradle-wrapper.jar"
+          cp "$TEMP_DIR/gradlew" "$TARGET/gradlew"
 
-          cp gradle/wrapper/gradle-wrapper.properties \
-            "$WRAPPER_DIR/gradle-wrapper.properties"
+          cp "$TEMP_DIR/gradlew.bat" "$TARGET/gradlew.bat"
+
+          cp "$TEMP_DIR/gradle/wrapper/gradle-wrapper.jar" \
+            "$TARGET/gradle/wrapper/gradle-wrapper.jar"
+
+          cp "$TEMP_DIR/gradle/wrapper/gradle-wrapper.properties" \
+            "$TARGET/gradle/wrapper/gradle-wrapper.properties"
 
           chmod +x "$TARGET/gradlew"
 
-          echo "Gradle Wrapper instalado com sucesso."
+          echo "Wrapper instalado em: $TARGET"
+
+          test -s "$TARGET/gradlew"
+          test -s "$TARGET/gradle/wrapper/gradle-wrapper.jar"
+          test -s "$TARGET/gradle/wrapper/gradle-wrapper.properties"
+
+          echo "Gradle Wrapper confirmado."
 
       - name: Confirmar Gradle Wrapper
         shell: bash
@@ -211,7 +222,7 @@ jobs:
 
           ls -lh gradle/wrapper/
 
-          echo "Wrapper completo."
+          echo "Wrapper completo confirmado."
 
       - name: Preparar cache Gradle
         shell: bash
@@ -298,7 +309,7 @@ jobs:
           APK="$PROJECT_DIR/build/app/outputs/flutter-apk/app-release.apk"
 
           if [ ! -s "$APK" ]; then
-            echo "::error::APK não encontrado."
+            echo "::error::APK nao encontrado ou vazio."
             exit 1
           fi
 
@@ -317,7 +328,7 @@ jobs:
           SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
 
           if [ -z "$SDK" ]; then
-            echo "::error::Android SDK não encontrado."
+            echo "::error::Android SDK nao encontrado."
             exit 1
           fi
 
@@ -329,7 +340,7 @@ jobs:
           )"
 
           if [ -z "$APKSIGNER" ]; then
-            echo "::error::Apksigner não encontrado."
+            echo "::error::Apksigner nao encontrado."
             exit 1
           fi
 
@@ -352,7 +363,7 @@ jobs:
           )"
 
           if [ -z "$SHA1" ] || [ -z "$SHA256" ]; then
-            echo "::error::Certificados não encontrados."
+            echo "::error::Certificados nao encontrados."
             exit 1
           fi
 
