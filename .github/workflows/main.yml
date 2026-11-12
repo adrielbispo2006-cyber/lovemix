@@ -44,34 +44,15 @@ jobs:
           channel: stable
           cache: true
 
-      # 4. Android SDK
-      - name: Instalar Android SDK
+      # 4      - name: Instalar Android SDK
         uses: android-actions/setup-android@v3
 
-      # 5. Preparar SDK 35 e licenças
       - name: Preparar Android SDK
-        shell: bash
         run: |
-          set -euo pipefail
-
-          echo "Preparando Android SDK..."
-
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-
-          if [ ! -f "$SDKMANAGER" ]; then
-            SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" \
-              -type f -name sdkmanager | sort | tail -n 1)"
-          fi
-
-          if [ -z "$SDKMANAGER" ] || [ ! -f "$SDKMANAGER" ]; then
-            echo "::error::SDK Manager não encontrado."
-            exit 1
-          fi
-
-          echo "Aceitando licenças Android..."
-
-          set +o pipefail
-          yes | "$SDKMANAGER" --licenses || true
+          sdkmanager --install "platform-tools"
+          sdkmanager --install "platforms;android-35"
+          sdkmanager --install "build-tools;35.0.0"
+          yes | sdkmanager --licenses|| true
           set -o pipefail
 
           echo "Instalando Android SDK 35..."
