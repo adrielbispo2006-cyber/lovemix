@@ -10,7 +10,7 @@ on:
       - '.github/workflows/**'
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: lovemix-build
@@ -49,9 +49,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t ZIPS < <( find . -maxdepth 1 -type f -iname '*.zip' | sort )
+          mapfile -t ZIPS < <(find . -maxdepth 1 -type f -iname '*.zip' | sort)
           if [ "${#ZIPS[@]}" -ne 1 ]; then
-            echo "::error::Deixe somente um ZIP na raiz do repositorio."
+            echo "::error::Deixe somente um ZIP do projeto na raiz do repositorio."
             exit 1
           fi
           unzip -t "${ZIPS[0]}"
@@ -69,9 +69,9 @@ jobs:
               PROJECT_DIR="$DIR"
               break
             fi
-          done < <( find extracted -type f -name pubspec.yaml -print0 )
+          done < <(find extracted -type f -name pubspec.yaml -print0)
           if [ -z "$PROJECT_DIR" ]; then
-            echo "::error::Projeto Flutter nao encontrado."
+            echo "::error::Projeto Flutter não encontrado."
             exit 1
           fi
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
@@ -88,42 +88,39 @@ jobs:
             android/settings.gradle \
             android/app/build.gradle \
             android/app/src/main/AndroidManifest.xml \
-            android/gradlew \
-            android/gradle/wrapper/gradle-wrapper.properties
-          do
+            android/gradlew; do
             if [ ! -s "$FILE" ]; then
               echo "::error::Arquivo ausente: $FILE"
               exit 1
             fi
           done
           chmod +x android/gradlew
-          echo "Arquivos principais encontrados."
 
-      - name: Configurar Gradle 8.14.3
+      - name: Configurar diretório Gradle
         shell: bash
         run: |
           set -euo pipefail
-          cd "$PROJECT_DIR/android"
-          if ! grep -Fq '8.14.3' gradlew; then
-            echo "::error::Gradle 8.14.3 nao identificado no gradlew."
-            exit 1
-          fi
-          chmod +x gradlew
-          echo "Gradle 8.14.3 identificado."
+          mkdir -p "$RUNNER_TEMP/lovemix-gradle-home"
+          echo "GRADLE_USER_HOME=$RUNNER_TEMP/lovemix-gradle-home" >> "$GITHUB_ENV"
 
-      - name: Verificar versão real do Gradle
+      - name: Configurar assinatura do APK
         shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          export GRADLE_USER_HOME="$RUNNER_TEMP/lovemix-gradle-home"
-          mkdir -p "$GRADLE_USER_HOME"
-          echo "GRADLE_USER_HOME=$GRADLE_USER_HOME" >> "$GITHUB_ENV"
-          cd "$PROJECT_DIR/android"
-          ./gradlew --no-daemon --version
-          VERSION="$( ./gradlew --no-daemon --version | grep -m1 '^Gradle ' | awk '{print $2}' )"
-          echo "Versao encontrada: $VERSION"
-          if [ "$VERSION" != "8.14.3" ]; then
-            echo "::error::Esperado Gradle 8.14.3."
-            exit 1
+          if [ -z "${ANDROID_KEYSTORE_BASE64:-}" ] || \
+             [ -z "${ANDROID_KEYSTORE_PASSWORD:-}" ] || \
+             [ -z "${ANDROID_KEY_ALIAS:-}" ] || \
+             [ -z "${ANDROID_KEY_PASSWORD:-}" ]; then
+            echo "::warning::Secrets de assinatura ausentes; o projeto usará a assinatura debug configurada no Gradle."
+            exit 0
           fi
-          echo "Gradle confirmado."
+          mkdir -p "$PROJECT_DIR/android/keystore"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" \vert{} base64 --decode > "$PROJECT_DIR/android/keystore/lovemix-release.jks"
+          test -s "$PROJECT_DIR/android/keystore/lovemix-release.jks"
+          echo "ANDROID_KEYSTORE_PATH=$GITHUB_WORKSPACE/$PROJECT_DIR/android/keystore/lovemix-release.jks" >> "$GITHUB_ENV"
+          echo "ANDROID_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD" >> "$
