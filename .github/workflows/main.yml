@@ -24,7 +24,7 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Baixar projeto
+      - name: Baixar projeto do GitHub
         uses: actions/checkout@v4
 
       - name: Instalar Java 17
@@ -33,30 +33,35 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Instalar Flutter
+      - name: Instalar Flutter estável
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
       - name: Instalar ferramentas
+        shell: bash
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y unzip zip
+          sudo apt-get install -y unzip zip curl
 
       - name: Verificar e extrair ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          mapfile -t ZIPS < <(find . -maxdepth 1 -type f -iname '*.zip' | sort)
+          mapfile -t ZIPS < <(
+            find . -maxdepth 1 -type f -iname '*.zip' | sort
+          )
 
           if [ "${#ZIPS[@]}" -ne 1 ]; then
-            echo "::error::Deixe somente um ZIP na raiz do GitHub."
+            echo "::error::Deixe somente um ZIP na raiz do repositório."
             exit 1
           fi
 
           unzip -t "${ZIPS[0]}"
+
           mkdir -p extracted
           unzip -q "${ZIPS[0]}" -d extracted
 
@@ -74,7 +79,9 @@ jobs:
               PROJECT_DIR="$DIR"
               break
             fi
-          done < <(find extracted -type f -name pubspec.yaml -print0)
+          done < <(
+            find extracted -type f -name pubspec.yaml -print0
+          )
 
           if [ -z "$PROJECT_DIR" ]; then
             echo "::error::Projeto Flutter não encontrado."
@@ -82,9 +89,10 @@ jobs:
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Projeto encontrado: $PROJECT_DIR"
 
-      - name: Verificar arquivos obrigatórios
+          echo "Projeto localizado: $PROJECT_DIR"
+
+      - name: Verificar arquivos do projeto
         shell: bash
         run: |
           set -euo pipefail
@@ -93,56 +101,123 @@ jobs:
 
           test -s pubspec.yaml
           test -s lib/main.dart
-          test -s android/gradlew
-          test -s android/gradle/wrapper/gradle-wrapper.properties
+          test -s android/settings.gradle
+          test -s android/app/build.gradle
           test -s android/app/src/main/AndroidManifest.xml
 
-          chmod +x android/gradlew
+          echo "Arquivos principais encontrados."
 
-      - name: Atualizar Gradle Wrapper
+      - name: Preparar ambiente Gradle isolado
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="9.3.1"
+
+          DOWNLOAD_DIR="$RUNNER_TEMP/lovemix-gradle"
+          BOOTSTRAP_DIR="$RUNNER_TEMP/lovemix-wrapper-bootstrap"
+
+          mkdir -p "$DOWNLOAD_DIR"
+          mkdir -p "$BOOTSTRAP_DIR"
+
+          echo "Baixando Gradle $VERSION..."
+
+          curl -fL --retry 3 \
+            "https://services.gradle.org/distributions/gradle-${VERSION}-bin.zip" \
+            -o "$DOWNLOAD_DIR/gradle.zip"
+
+          unzip -q "$DOWNLOAD_DIR/gradle.zip" -d "$DOWNLOAD_DIR"
+
+          GRADLE="$DOWNLOAD_DIR/gradle-${VERSION}/bin/gradle"
+
+          test -x "$GRADLE"
+
+          echo "Gradle baixado:"
+          "$GRADLE" --version
+
+          echo "GRADLE_BOOTSTRAP=$GRADLE" >> "$GITHUB_ENV"
+
+      - name: Gerar novamente o Gradle Wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BOOTSTRAP_DIR="$RUNNER_TEMP/lovemix-wrapper-bootstrap"
+
+          mkdir -p "$BOOTSTRAP_DIR"
+
+          cd "$BOOTSTRAP_DIR"
+
+          printf "rootProject.name = 'lovemix-wrapper'\n" > settings.gradle
+          printf "\n" > build.gradle
+
+          "$GRADLE_BOOTSTRAP" \
+            --no-daemon \
+            wrapper \
+            --gradle-version 9.3.1 \
+            --distribution-type bin
+
+          TARGET="$PROJECT_DIR/android"
+
+          mkdir -p "$TARGET/gradle/wrapper"
+
+          cp gradlew "$TARGET/gradlew"
+          cp gradlew.bat "$TARGET/gradlew.bat"
+
+          cp gradle/wrapper/gradle-wrapper.jar \
+            "$TARGET/gradle/wrapper/gradle-wrapper.jar"
+
+          cp gradle/wrapper/gradle-wrapper.properties \
+            "$TARGET/gradle/wrapper/gradle-wrapper.properties"
+
+          chmod +x "$TARGET/gradlew"
+
+          echo "Wrapper regenerado:"
+          ls -lh "$TARGET/gradlew"
+          ls -lh "$TARGET/gradle/wrapper/"
+
+      - name: Conferir configuração do Wrapper
         shell: bash
         run: |
           set -euo pipefail
 
           WRAPPER="$PROJECT_DIR/android/gradle/wrapper/gradle-wrapper.properties"
 
-          cat > "$WRAPPER" <<'EOF'
-          distributionBase=GRADLE_USER_HOME
-          distributionPath=wrapper/dists
-          distributionUrl=https\://services.gradle.org/distributions/gradle-9.3.1-bin.zip
-          networkTimeout=120000
-          validateDistributionUrl=true
-          zipStoreBase=GRADLE_USER_HOME
-          zipStorePath=wrapper/dists
-          EOF
-
-          echo "Conferindo arquivo Gradle:"
           cat "$WRAPPER"
 
           grep -q 'gradle-9.3.1-bin.zip' "$WRAPPER"
 
-      - name: Confirmar versão do Gradle
+          test -s "$PROJECT_DIR/android/gradle/wrapper/gradle-wrapper.jar"
+          test -s "$PROJECT_DIR/android/gradlew"
+
+          echo "Arquivos do Wrapper confirmados."
+
+      - name: Verificar versão real do Gradle
         shell: bash
         run: |
           set -euo pipefail
 
+          export GRADLE_USER_HOME="$RUNNER_TEMP/lovemix-gradle-home"
+
+          mkdir -p "$GRADLE_USER_HOME"
+
+          echo "GRADLE_USER_HOME=$GRADLE_USER_HOME" >> "$GITHUB_ENV"
+
           cd "$PROJECT_DIR/android"
 
-          chmod +x gradlew
+          ./gradlew --no-daemon --version
 
-          echo "Executando Gradle Wrapper:"
-          ./gradlew --version
-
-          VERSION="$(./gradlew --version | grep -m1 '^Gradle ' | awk '{print $2}')"
+          VERSION="$(./gradlew --no-daemon --version |
+            grep -m1 '^Gradle ' | awk '{print $2}')"
 
           echo "Versão detectada: $VERSION"
 
           if [ "$VERSION" != "9.3.1" ]; then
-            echo "::error::A versão do Gradle não é 9.3.1."
+            echo "::error::Gradle incorreto: $VERSION"
             exit 1
           fi
 
-          echo "Gradle correto confirmado."
+          echo "Gradle 9.3.1 confirmado!"
 
       - name: Configurar Android
         shell: bash
@@ -157,7 +232,7 @@ jobs:
             echo 'android.suppressUnsupportedCompileSdk=37' >> android/gradle.properties
           fi
 
-      - name: Configurar assinatura
+      - name: Configurar assinatura do APK
         shell: bash
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -171,46 +246,70 @@ jobs:
              [ -z "${ANDROID_KEYSTORE_PASSWORD:-}" ] || \
              [ -z "${ANDROID_KEY_ALIAS:-}" ] || \
              [ -z "${ANDROID_KEY_PASSWORD:-}" ]; then
-            echo "::warning::Assinatura fixa não configurada. Será usada a assinatura debug."
+
+            echo "::warning::Secrets não configurados. Será usada assinatura debug."
             exit 0
           fi
 
           mkdir -p "$PROJECT_DIR/android/keystore"
 
           printf '%s' "$ANDROID_KEYSTORE_BASE64" | \
-            base64 --decode > "$PROJECT_DIR/android/keystore/lovemix-release.jks"
+            base64 --decode > \
+            "$PROJECT_DIR/android/keystore/lovemix-release.jks"
 
           test -s "$PROJECT_DIR/android/keystore/lovemix-release.jks"
 
           echo "ANDROID_KEYSTORE_PATH=$GITHUB_WORKSPACE/$PROJECT_DIR/android/keystore/lovemix-release.jks" >> "$GITHUB_ENV"
+
           echo "ANDROID_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
           echo "ANDROID_KEY_ALIAS=$ANDROID_KEY_ALIAS" >> "$GITHUB_ENV"
           echo "ANDROID_KEY_PASSWORD=$ANDROID_KEY_PASSWORD" >> "$GITHUB_ENV"
 
-      - name: Verificar ambiente
-        run: |
-          flutter --version
-          java -version
-
-      - name: Baixar dependências
+      - name: Verificar Java e Flutter
         shell: bash
         run: |
           set -euo pipefail
+
+          java -version
+          flutter --version
+          flutter doctor -v
+
+      - name: Baixar dependências Flutter
+        shell: bash
+        run: |
+          set -euo pipefail
+
           cd "$PROJECT_DIR"
+
           flutter pub get
 
-      - name: Analisar Flutter
+      - name: Analisar código Flutter
         shell: bash
         run: |
           set -euo pipefail
+
           cd "$PROJECT_DIR"
-          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings
+
+          flutter analyze --no-pub \
+            --no-fatal-infos \
+            --no-fatal-warnings
+
+      - name: Confirmar Gradle antes da compilação
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR/android"
+
+          ./gradlew --no-daemon --version
 
       - name: Compilar APK Release
         shell: bash
         run: |
           set -euo pipefail
+
           cd "$PROJECT_DIR"
+
           flutter build apk --release
 
       - name: Validar APK
@@ -221,7 +320,7 @@ jobs:
           APK="$PROJECT_DIR/build/app/outputs/flutter-apk/app-release.apk"
 
           if [ ! -s "$APK" ]; then
-            echo "::error::APK não foi gerado."
+            echo "::error::APK não encontrado ou vazio."
             exit 1
           fi
 
@@ -229,9 +328,10 @@ jobs:
 
           cp "$APK" "$GITHUB_WORKSPACE/apk-final/LoveMix.apk"
 
+          echo "APK gerado:"
           ls -lh "$GITHUB_WORKSPACE/apk-final/LoveMix.apk"
 
-      - name: Verificar certificado
+      - name: Verificar certificado SHA-1 e SHA-256
         shell: bash
         run: |
           set -euo pipefail
@@ -243,17 +343,22 @@ jobs:
             exit 1
           fi
 
-          APKSIGNER="$(find "$SDK/build-tools" -type f -name apksigner | sort -V | tail -1)"
+          APKSIGNER="$(find "$SDK/build-tools" \
+            -type f -name apksigner | sort -V | tail -1)"
 
           if [ -z "$APKSIGNER" ]; then
             echo "::error::Apksigner não encontrado."
             exit 1
           fi
 
-          CERTS="$("$APKSIGNER" verify --print-certs "$GITHUB_WORKSPACE/apk-final/LoveMix.apk")"
+          CERTS="$("$APKSIGNER" verify --print-certs \
+            "$GITHUB_WORKSPACE/apk-final/LoveMix.apk")"
 
-          SHA1="$(echo "$CERTS" | grep -m1 'certificate SHA-1 digest' | awk '{print $NF}')"
-          SHA256="$(echo "$CERTS" | grep -m1 'certificate SHA-256 digest' | awk '{print $NF}')"
+          SHA1="$(echo "$CERTS" |
+            grep -m1 'certificate SHA-1 digest' | awk '{print $NF}')"
+
+          SHA256="$(echo "$CERTS" |
+            grep -m1 'certificate SHA-256 digest' | awk '{print $NF}')"
 
           {
             echo "## Certificado LoveMix"
@@ -262,6 +367,9 @@ jobs:
             echo ""
             echo "SHA-256: $SHA256"
           } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "SHA-1: $SHA1"
+          echo "SHA-256: $SHA256"
 
       - name: Enviar APK para download
         uses: actions/upload-artifact@v4
