@@ -25,6 +25,7 @@ jobs:
     timeout-minutes: 60
 
     steps:
+
       # 1. Baixar projeto
       - name: Baixar projeto do GitHub
         uses: actions/checkout@v4
@@ -54,6 +55,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           mkdir -p "$GITHUB_WORKSPACE/extracted"
 
           if [[ -f "$GITHUB_WORKSPACE/pubspec.yaml" && -f "$GITHUB_WORKSPACE/lib/main.dart" ]]; then
@@ -67,6 +69,7 @@ jobs:
             fi
 
             echo "Extraindo: $ZIP_FILE"
+
             unzip -q "$ZIP_FILE" -d "$GITHUB_WORKSPACE/extracted"
 
             PUBSPEC="$(find "$GITHUB_WORKSPACE/extracted" -type f -name pubspec.yaml \
@@ -83,7 +86,9 @@ jobs:
 
           PROJECT_DIR="$(realpath "$PROJECT_DIR")"
 
+          test -f "$PROJECT_DIR/pubspec.yaml"
           test -f "$PROJECT_DIR/lib/main.dart"
+
           test -f "$PROJECT_DIR/android/app/build.gradle" || \
           test -f "$PROJECT_DIR/android/app/build.gradle.kts"
 
@@ -94,18 +99,32 @@ jobs:
 
           echo "Projeto localizado: $PROJECT_DIR"
 
-      # 6. CORREÇÃO DEFINITIVA DO WRAPPER
-      - name: Corrigir Gradle Wrapper para 9.3.1
-        working-directory: ${{ env.PROJECT_DIR }}
+      # 6. Instalar Gradle oficial e substituir Wrapper antigo
+      - name: Instalar Gradle oficial 9.3.1
         shell: bash
         run: |
           set -euo pipefail
 
-          ANDROID_DIR="$PROJECT_DIR/android"
+          echo "Baixando Gradle 9.3.1 oficial..."
 
-          mkdir -p "$ANDROID_DIR/gradle/wrapper"
+          curl --fail --location --retry 3 \
+            https://services.gradle.org/distributions/gradle-9.3.1-bin.zip \
+            --output /tmp/gradle-9.3.1.zip
 
-          cat > "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.properties" <<'PROPERTIES'
+          unzip -q -o /tmp/gradle-9.3.1.zip -d /tmp
+
+          GRADLE_BIN="/tmp/gradle-9.3.1/bin/gradle"
+
+          test -x "$GRADLE_BIN"
+
+          echo "Validando instalação..."
+
+          "$GRADLE_BIN" --version
+
+          mkdir -p "$PROJECT_DIR/android/gradle/wrapper"
+
+          # Atualizar propriedades do projeto
+          cat > "$PROJECT_DIR/android/gradle/wrapper/gradle-wrapper.properties" <<'PROPERTIES'
           distributionBase=GRADLE_USER_HOME
           distributionPath=wrapper/dists
           distributionUrl=https\://services.gradle.org/distributions/gradle-9.3.1-bin.zip
@@ -115,14 +134,19 @@ jobs:
           zipStorePath=wrapper/dists
           PROPERTIES
 
-          chmod +x "$ANDROID_DIR/gradlew"
+          # Substituir o gradlew antigo por um lançador direto
+          cat > "$PROJECT_DIR/android/gradlew" <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          exec /tmp/gradle-9.3.1/bin/gradle "$@"
+          SCRIPT
 
-          echo "Wrapper configurado para Gradle 9.3.1."
+          chmod 755 "$PROJECT_DIR/android/gradlew"
 
-          cat "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.properties"
+          echo "Gradle 9.3.1 instalado e Wrapper antigo substituído."
 
-      # 7. Validar versões Android
-      - name: Validar versões Android do ZIP
+      # 7. Validar configurações Android
+      - name: Validar configurações Android
         shell: bash
         run: |
           set -euo pipefail
@@ -134,8 +158,6 @@ jobs:
           if [[ ! -f "$SETTINGS" ]]; then
             SETTINGS="$ANDROID_DIR/settings.gradle.kts"
           fi
-
-          echo "Verificando configurações Android..."
 
           grep -q 'com.android.application' "$SETTINGS" || {
             echo '::error::Plugin Android não encontrado.'
@@ -149,6 +171,8 @@ jobs:
 
           grep -Fq 'gradle-9.3.1-bin.zip' \
             "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.properties"
+
+          test -x "$ANDROID_DIR/gradlew"
 
           echo "Configuração Android validada."
 
@@ -199,9 +223,11 @@ jobs:
       # 10. Dependências Flutter
       - name: Baixar dependências Flutter
         working-directory: ${{ env.PROJECT_DIR }}
-        run: flutter pub get
+        run: |
+          set -euo pipefail
+          flutter pub get
 
-      # 11. Corrigir Zego
+      # 11. Corrigir plugins ZEGO
       - name: Corrigir repositórios e ordem dos plugins ZEGO
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
@@ -287,11 +313,11 @@ jobs:
           for item in changed:
               print(item)
 
-          print('Verificação ZEGO concluída.')
+          print('Correção ZEGO concluída.')
           PY
 
-      # 12. VALIDAR GRADLE 9.3.1
-      - name: Validar ambiente e Gradle 9.3.1
+      # 12. Validar ambiente e Gradle
+      - name: Validar ambiente Gradle 9.3.1
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
@@ -303,19 +329,7 @@ jobs:
           echo "Flutter:"
           flutter --version
 
-          echo "Corrigindo Wrapper novamente antes da validação..."
-
-          cat > android/gradle/wrapper/gradle-wrapper.properties <<'PROPERTIES'
-          distributionBase=GRADLE_USER_HOME
-          distributionPath=wrapper/dists
-          distributionUrl=https\://services.gradle.org/distributions/gradle-9.3.1-bin.zip
-          networkTimeout=120000
-          validateDistributionUrl=true
-          zipStoreBase=GRADLE_USER_HOME
-          zipStorePath=wrapper/dists
-          PROPERTIES
-
-          chmod +x android/gradlew
+          echo "Gradle utilizado pelo projeto:"
 
           cd android
 
@@ -323,14 +337,11 @@ jobs:
 
           ./gradlew --version | tee /tmp/lovemix-gradle-version.txt
 
-          if ! grep -q 'Gradle 9.3.1' /tmp/lovemix-gradle-version.txt; then
-            echo '::error::Gradle 9.3.1 não foi carregado.'
-            exit 1
-          fi
+          grep -q 'Gradle 9.3.1' /tmp/lovemix-gradle-version.txt
 
           echo "Gradle 9.3.1 confirmado!"
 
-      # 13. Compilar APK
+      # 13. Compilar APK Release
       - name: Compilar APK Release
         id: build_apk
         working-directory: ${{ env.PROJECT_DIR }}
@@ -338,20 +349,17 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Garantir Wrapper correto antes de compilar.
-          cat > android/gradle/wrapper/gradle-wrapper.properties <<'PROPERTIES'
-          distributionBase=GRADLE_USER_HOME
-          distributionPath=wrapper/dists
-          distributionUrl=https\://services.gradle.org/distributions/gradle-9.3.1-bin.zip
-          networkTimeout=120000
-          validateDistributionUrl=true
-          zipStoreBase=GRADLE_USER_HOME
-          zipStorePath=wrapper/dists
-          PROPERTIES
+          echo "Verificando Gradle antes da compilação..."
 
-          chmod +x android/gradlew
+          cd android
 
-          echo "Iniciando compilação LoveMix..."
+          ./gradlew --version | tee /tmp/lovemix-final-gradle.txt
+
+          grep -q 'Gradle 9.3.1' /tmp/lovemix-final-gradle.txt
+
+          cd ..
+
+          echo "Iniciando compilação Flutter..."
 
           flutter build apk --release
 
@@ -373,10 +381,24 @@ jobs:
 
           test -s "$GITHUB_WORKSPACE/dist/LoveMix-release.apk"
 
-          echo "APK gerado com sucesso!"
+          echo "APK LoveMix gerado com sucesso!"
 
-      # 14. Calcular SHA-1 e SHA-256
-      - name: Calcular SHA-1, SHA-256 e fingerprints do certificado
+      # 14. Validar APK
+      - name: Validar APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="$GITHUB_WORKSPACE/dist/LoveMix-release.apk"
+
+          test -s "$APK"
+
+          file "$APK"
+
+          echo "APK validado."
+
+      # 15. Calcular SHA-1 e SHA-256
+      - name: Calcular SHA-1 SHA-256 e fingerprints
         id: hashes
         shell: bash
         run: |
@@ -399,6 +421,7 @@ jobs:
           CERT_SHA256='Não disponível'
 
           if [[ -n "$APKSIGNER" ]]; then
+
             CERT_INFO="$("$APKSIGNER" verify --print-certs "$APK" 2>&1 || true)"
 
             CERT_SHA1="$(printf '%s\n' "$CERT_INFO" |
@@ -409,6 +432,7 @@ jobs:
 
             CERT_SHA1="${CERT_SHA1:-Não disponível}"
             CERT_SHA256="${CERT_SHA256:-Não disponível}"
+
           else
             echo '::warning::apksigner não encontrado.'
           fi
@@ -431,16 +455,16 @@ jobs:
             echo 'SHA-256 do arquivo:'
             echo "$FILE_SHA256"
             echo
-            echo 'SHA-1 do certificado:'
+            echo 'SHA-1 do certificado Firebase/Google:'
             echo "$CERT_SHA1"
             echo
-            echo 'SHA-256 do certificado:'
+            echo 'SHA-256 do certificado Firebase/Google:'
             echo "$CERT_SHA256"
           } > "$GITHUB_WORKSPACE/dist/CHECKSUMS.txt"
 
-          file "$APK"
+          echo "Hashes calculados."
 
-      # 15. Publicar artefato
+      # 16. Publicar artefato
       - name: Publicar APK como artefato
         uses: actions/upload-artifact@v4
         with:
@@ -451,7 +475,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # 16. Preparar Release
+      # 17. Preparar Release
       - name: Preparar Release
         id: release_meta
         shell: bash
@@ -463,7 +487,7 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "release_name=LoveMix ${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
 
-      # 17. Criar Release
+      # 18. Criar Release
       - name: Criar Release para download
         uses: softprops/action-gh-release@v2
         with:
@@ -482,7 +506,7 @@ jobs:
           prerelease: false
           fail_on_unmatched_files: true
 
-      # 18. Summary preto e roxo
+      # 19. Summary roxo e preto
       - name: Mostrar download e SHA no Summary
         if: success()
         env:
