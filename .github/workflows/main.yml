@@ -7,6 +7,10 @@ on:
     paths:
       - '*.zip'
       - '**/*.zip'
+      - '**/*.dart'
+      - 'pubspec.yaml'
+      - 'pubspec.lock'
+      - 'android/**'
       - '.github/workflows/**'
   workflow_dispatch:
 
@@ -22,40 +26,74 @@ jobs:
   build:
     name: Compilar LoveMix
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
 
+      # 1. Baixar projeto
       - name: Baixar projeto do GitHub
         uses: actions/checkout@v4
 
+      # 2. Java 17
       - name: Instalar Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
+      # 3. Flutter
       - name: Instalar Flutter estável
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
-      - name: Instalar Android SDK
-        uses: android-actions/setup-android@v3
+      # 4. Preparar Android SDK sem pacote obsoleto tools
+      - name: Preparar Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
 
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+
+          if [[ ! -d "$SDK_ROOT" ]]; then
+            echo "::error::Android SDK não encontrado: $SDK_ROOT"
+            exit 1
+          fi
+
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" \
+            -type f -name sdkmanager 2>/dev/null | sort -V | tail -n 1 || true)"
+
+          if [[ -z "$SDKMANAGER" ]]; then
+            echo "::error::sdkmanager não encontrado."
+            exit 1
+          fi
+
+          echo "SDK: $SDK_ROOT"
+          echo "SDK Manager: $SDKMANAGER"
+
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+
+          echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+
+          "$SDKMANAGER" --install \
+            "platforms;android-37" \
+            "build-tools;37.0.0" \
+            "platform-tools"
+
+          echo "Android SDK instalado."
+
+      # 5. Ferramentas auxiliares
       - name: Instalar ferramentas
         run: |
           sudo apt-get update
           sudo apt-get install -y unzip zip curl jq file python3
 
-          yes | sdkmanager --licenses
-
-          sdkmanager --install \
-            "platforms;android-35" \
-            "build-tools;35.0.0" \
-            "platform-tools"
-
+      # 6. Localizar projeto
       - name: Localizar projeto LoveMix
         shell: bash
         run: |
@@ -63,24 +101,32 @@ jobs:
 
           mkdir -p "$GITHUB_WORKSPACE/extracted"
 
-          if [[ -f "$GITHUB_WORKSPACE/pubspec.yaml" && -f "$GITHUB_WORKSPACE/lib/main.dart" ]]; then
+          if [[ -f "$GITHUB_WORKSPACE/pubspec.yaml" && \
+                -f "$GITHUB_WORKSPACE/lib/main.dart" ]]; then
+
             PROJECT_DIR="$GITHUB_WORKSPACE"
+
           else
-            ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname '*.zip' | sort | tail -n 1)"
+
+            ZIP_FILE="$(find "$GITHUB_WORKSPACE" \
+              -maxdepth 1 -type f -iname '*.zip' | sort | tail -n 1)"
 
             if [[ -z "$ZIP_FILE" ]]; then
-              echo '::error::Nenhum ZIP encontrado.'
+              echo "::error::Nenhum ZIP encontrado."
               exit 1
             fi
 
+            echo "Extraindo projeto: $ZIP_FILE"
+
             unzip -q "$ZIP_FILE" -d "$GITHUB_WORKSPACE/extracted"
 
-            PUBSPEC="$(find "$GITHUB_WORKSPACE/extracted" -type f -name pubspec.yaml \
+            PUBSPEC="$(find "$GITHUB_WORKSPACE/extracted" \
+              -type f -name pubspec.yaml \
               -not -path '*/.dart_tool/*' \
               -not -path '*/build/*' | head -n 1)"
 
             if [[ -z "$PUBSPEC" ]]; then
-              echo '::error::pubspec.yaml não encontrado.'
+              echo "::error::pubspec.yaml não encontrado."
               exit 1
             fi
 
@@ -91,18 +137,14 @@ jobs:
 
           test -f "$PROJECT_DIR/pubspec.yaml"
           test -f "$PROJECT_DIR/lib/main.dart"
-
-          test -f "$PROJECT_DIR/android/app/build.gradle" || \
-          test -f "$PROJECT_DIR/android/app/build.gradle.kts"
-
-          test -f "$PROJECT_DIR/android/settings.gradle" || \
-          test -f "$PROJECT_DIR/android/settings.gradle.kts"
+          test -d "$PROJECT_DIR/android"
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
           echo "Projeto localizado: $PROJECT_DIR"
 
-      - name: Instalar Gradle oficial 9.3.1
+      # 7. Configurar Gradle 9.3.1
+      - name: Instalar Gradle 9.3.1
         shell: bash
         run: |
           set -euo pipefail
@@ -139,83 +181,9 @@ jobs:
 
           chmod 755 "$PROJECT_DIR/android/gradlew"
 
-      - name: Corrigir compileSdk para Android 35
-        shell: bash
-        run: |
-          set -euo pipefail
+          echo "Gradle 9.3.1 configurado."
 
-          python3 <<'PY'
-          from pathlib import Path
-          import re
-          import sys
-
-          root = Path(__import__('os').environ['PROJECT_DIR'])
-          android = root / 'android' / 'app'
-
-          candidates = [
-              android / 'build.gradle',
-              android / 'build.gradle.kts'
-          ]
-
-          gradle_file = next(
-              (p for p in candidates if p.is_file()),
-              None
-          )
-
-          if gradle_file is None:
-              print('::error::Arquivo build.gradle não encontrado.')
-              sys.exit(1)
-
-          content = gradle_file.read_text()
-
-          if gradle_file.name.endswith('.kts'):
-              replacement = 'compileSdk = 35'
-          else:
-              replacement = 'compileSdk 35'
-
-          patterns = [
-              r'(?m)^(\s*)compileSdkVersion\s+.*$',
-              r'(?m)^(\s*)compileSdk\s*=\s*.*$',
-              r'(?m)^(\s*)compileSdk\s+.*$'
-          ]
-
-          changed = False
-
-          for pattern in patterns:
-              if re.search(pattern, content):
-                  content = re.sub(
-                      pattern,
-                      lambda m: m.group(1) + replacement,
-                      content,
-                      count=1
-                  )
-                  changed = True
-                  break
-
-          if not changed:
-              match = re.search(r'(?m)^(\s*)android\s*\{', content)
-
-              if not match:
-                  print('::error::Bloco android não encontrado.')
-                  sys.exit(1)
-
-              indent = match.group(1) + '    '
-
-              content = (
-                  content[:match.end()] +
-                  '\n' + indent + replacement +
-                  content[match.end():]
-              )
-
-          gradle_file.write_text(content)
-
-          print('compileSdk configurado para Android 35.')
-          print(gradle_file)
-          PY
-
-          grep -n 'compileSdk' "$PROJECT_DIR/android/app/build.gradle" 2>/dev/null || \
-          grep -n 'compileSdk' "$PROJECT_DIR/android/app/build.gradle.kts"
-
+      # 8. Validar SDK e configurações Android
       - name: Validar configurações Android
         shell: bash
         run: |
@@ -229,21 +197,22 @@ jobs:
             SETTINGS="$ANDROID_DIR/settings.gradle.kts"
           fi
 
-          grep -q 'com.android.application' "$SETTINGS" || {
-            echo '::error::Plugin Android não encontrado.'
-            exit 1
-          }
+          grep -q 'com.android.application' "$SETTINGS"
+          grep -q 'org.jetbrains.kotlin.android' "$SETTINGS"
 
-          grep -q 'org.jetbrains.kotlin.android' "$SETTINGS" || {
-            echo '::error::Plugin Kotlin não encontrado.'
-            exit 1
-          }
+          grep -q 'compileSdk 37' \
+            "$ANDROID_DIR/app/build.gradle" || \
+          grep -q 'compileSdk = 37' \
+            "$ANDROID_DIR/app/build.gradle.kts"
+
+          test -d "$ANDROID_HOME/platforms/android-37"
 
           grep -Fq 'gradle-9.3.1-bin.zip' \
             "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.properties"
 
-          echo 'Configuração Android validada.'
+          echo "Configuração Android validada."
 
+      # 9. Cache Gradle
       - name: Preparar cache Gradle
         uses: actions/cache@v4
         with:
@@ -254,7 +223,8 @@ jobs:
           restore-keys: |
             lovemix-gradle-${{ runner.os }}-
 
-      - name: Configurar assinatura persistente (opcional)
+      # 10. Assinatura persistente opcional
+      - name: Configurar assinatura persistente
         shell: bash
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -264,36 +234,45 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ -z "$KEYSTORE_BASE64" ]]; then
-            echo 'Keystore não configurado; usando assinatura do projeto.'
+          if [[ -z "${KEYSTORE_BASE64:-}" ]]; then
+            echo "Keystore não configurado."
+            echo "Será utilizada a assinatura configurada no projeto."
             exit 0
           fi
 
-          if [[ -z "$STORE_PASSWORD" || -z "$KEY_ALIAS" || -z "$KEY_PASSWORD" ]]; then
-            echo '::error::Configure todos os secrets ANDROID_*.'
+          if [[ -z "${STORE_PASSWORD:-}" || \
+                -z "${KEY_ALIAS:-}" || \
+                -z "${KEY_PASSWORD:-}" ]]; then
+            echo "::error::Configure todos os secrets ANDROID."
             exit 1
           fi
 
           mkdir -p "$RUNNER_TEMP/lovemix-signing"
 
-          echo "$KEYSTORE_BASE64" | base64 --decode \
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode \
             > "$RUNNER_TEMP/lovemix-signing/release.jks"
 
           test -s "$RUNNER_TEMP/lovemix-signing/release.jks"
 
-          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/lovemix-signing/release.jks" >> "$GITHUB_ENV"
-          echo "ANDROID_KEYSTORE_PASSWORD=$STORE_PASSWORD" >> "$GITHUB_ENV"
-          echo "ANDROID_KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
-          echo "ANDROID_KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
+          {
+            echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/lovemix-signing/release.jks"
+            echo "ANDROID_KEYSTORE_PASSWORD=$STORE_PASSWORD"
+            echo "ANDROID_KEY_ALIAS=$KEY_ALIAS"
+            echo "ANDROID_KEY_PASSWORD=$KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
 
+          echo "Assinatura persistente configurada."
+
+      # 11. Dependências Flutter
       - name: Baixar dependências Flutter
         working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
         run: |
           set -euo pipefail
           flutter pub get
 
-      - name: Corrigir repositórios e ordem dos plugins ZEGO
-        working-directory: ${{ env.PROJECT_DIR }}
+      # 12. Compatibilidade dos repositórios ZEGO
+      - name: Corrigir repositórios ZEGO
         shell: bash
         run: |
           set -euo pipefail
@@ -302,68 +281,32 @@ jobs:
           from pathlib import Path
           import re
 
-          cache = Path.home() / '.pub-cache' / 'hosted' / 'pub.dev'
+          cache = Path.home() / ".pub-cache/hosted/pub.dev"
 
-          for android_dir in cache.glob('zego_*/android'):
-              for gradle_file in (
-                  list(android_dir.glob('*.gradle')) +
-                  list(android_dir.glob('*.gradle.kts'))
-              ):
+          for android_dir in cache.glob("zego_*/android"):
+              files = (
+                  list(android_dir.glob("*.gradle")) +
+                  list(android_dir.glob("*.gradle.kts"))
+              )
+
+              for gradle_file in files:
                   original = gradle_file.read_text()
 
-                  content = re.sub(
-                      r'\bjcenter\s*\(\s*\)',
-                      'mavenCentral()',
+                  updated = re.sub(
+                      r"\bjcenter\s*\(\s*\)",
+                      "mavenCentral()",
                       original
                   )
 
-                  lines = content.splitlines()
+                  if updated != original:
+                      gradle_file.write_text(updated)
+                      print("Corrigido:", gradle_file)
 
-                  android_pattern = re.compile(
-                      r'''^\s*apply\s+plugin\s*:\s*['"]com\.android\.(?:library|application)['"]'''
-                  )
-
-                  kotlin_pattern = re.compile(
-                      r'''^\s*apply\s+plugin\s*:\s*['"](?:kotlin-android|org\.jetbrains\.kotlin\.android)['"]'''
-                  )
-
-                  android_positions = [
-                      i for i, line in enumerate(lines)
-                      if android_pattern.search(line)
-                  ]
-
-                  kotlin_positions = [
-                      i for i, line in enumerate(lines)
-                      if kotlin_pattern.search(line)
-                  ]
-
-                  if android_positions and kotlin_positions:
-                      if min(android_positions) > min(kotlin_positions):
-                          android_line = lines[min(android_positions)]
-                          kotlin_line = lines[min(kotlin_positions)]
-
-                          remove = set(android_positions + kotlin_positions)
-                          first = min(remove)
-
-                          lines = [
-                              line for i, line in enumerate(lines)
-                              if i not in remove
-                          ]
-
-                          lines[first:first] = [
-                              android_line,
-                              kotlin_line
-                          ]
-
-                          content = '\n'.join(lines) + '\n'
-
-                  if content != original:
-                      gradle_file.write_text(content)
-
-          print('Correção ZEGO concluída.')
+          print("Verificação ZEGO concluída.")
           PY
 
-      - name: Validar ambiente Gradle 9.3.1
+      # 13. Validar ambiente
+      - name: Validar Java Flutter e Gradle
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
@@ -372,14 +315,18 @@ jobs:
           java -version
           flutter --version
 
+          echo "Android SDK:"
+          ls "$ANDROID_HOME/platforms/android-37"
+
           cd android
 
           ./gradlew --version | tee /tmp/lovemix-gradle.txt
 
           grep -q 'Gradle 9.3.1' /tmp/lovemix-gradle.txt
 
-          echo 'Gradle 9.3.1 confirmado.'
+          echo "Ambiente validado."
 
+      # 14. Compilar APK
       - name: Compilar APK Release
         id: build_apk
         working-directory: ${{ env.PROJECT_DIR }}
@@ -387,11 +334,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo 'Verificando Android SDK 35...'
-
-          sdkmanager --list_installed | grep 'platforms;android-35'
-
-          echo 'Compilando LoveMix...'
+          echo "Compilando LoveMix..."
 
           flutter build apk --release -v
 
@@ -403,7 +346,7 @@ jobs:
           fi
 
           if [[ -z "$APK" || ! -s "$APK" ]]; then
-            echo '::error::APK Release não foi gerado.'
+            echo "::error::APK não foi gerado."
             exit 1
           fi
 
@@ -413,8 +356,9 @@ jobs:
 
           test -s "$GITHUB_WORKSPACE/dist/LoveMix-release.apk"
 
-          echo 'APK gerado com sucesso.'
+          echo "APK LoveMix gerado."
 
+      # 15. Validar APK
       - name: Validar APK
         shell: bash
         run: |
@@ -426,8 +370,9 @@ jobs:
 
           file "$APK"
 
-          echo 'APK validado.'
+          echo "APK validado."
 
+      # 16. SHA-1 e SHA-256
       - name: Calcular SHA-1 SHA-256 e fingerprints
         id: hashes
         shell: bash
@@ -439,16 +384,15 @@ jobs:
           FILE_SHA1="$(sha1sum "$APK" | awk '{print $1}')"
           FILE_SHA256="$(sha256sum "$APK" | awk '{print $1}')"
 
-          SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
-
-          APKSIGNER="$(find "$SDK_DIR/build-tools" \
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" \
             -type f -name apksigner | sort -V | tail -n 1 || true)"
 
-          CERT_SHA1='Não disponível'
-          CERT_SHA256='Não disponível'
+          CERT_SHA1="Não disponível"
+          CERT_SHA256="Não disponível"
 
           if [[ -n "$APKSIGNER" ]]; then
-            CERT_INFO="$("$APKSIGNER" verify --print-certs "$APK" 2>&1)"
+
+            CERT_INFO="$("$APKSIGNER" verify --print-certs "$APK" 2>&1 || true)"
 
             CERT_SHA1="$(printf '%s\n' "$CERT_INFO" |
               sed -n 's/.*certificate SHA-1 digest: *//p' | head -n 1)"
@@ -468,25 +412,24 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
           {
-            echo 'LoveMix - Verificação de integridade'
+            echo "LoveMix - Verificação de integridade"
             echo
-            echo 'APK: LoveMix-release.apk'
-            echo
-            echo 'SHA-1 do arquivo:'
+            echo "SHA-1 do arquivo:"
             echo "$FILE_SHA1"
             echo
-            echo 'SHA-256 do arquivo:'
+            echo "SHA-256 do arquivo:"
             echo "$FILE_SHA256"
             echo
-            echo 'SHA-1 do certificado Firebase/Google:'
+            echo "SHA-1 do certificado:"
             echo "$CERT_SHA1"
             echo
-            echo 'SHA-256 do certificado Firebase/Google:'
+            echo "SHA-256 do certificado:"
             echo "$CERT_SHA256"
           } > "$GITHUB_WORKSPACE/dist/CHECKSUMS.txt"
 
-          echo 'Hashes calculados.'
+          echo "Hashes calculados."
 
+      # 17. Publicar APK como artefato
       - name: Publicar APK como artefato
         uses: actions/upload-artifact@v4
         with:
@@ -497,6 +440,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      # 18. Preparar Release
       - name: Preparar Release
         id: release_meta
         shell: bash
@@ -508,6 +452,7 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "release_name=LoveMix ${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
 
+      # 19. Criar Release
       - name: Criar Release para download
         uses: softprops/action-gh-release@v2
         with:
@@ -518,9 +463,11 @@ jobs:
 
             APK Release compilado automaticamente.
 
-            Android compileSdk 35.
+            Android SDK 37.
+            Gradle 9.3.1.
+            Java 17.
 
-            SHA-1 e SHA-256 do APK e do certificado estão em CHECKSUMS.txt.
+            SHA-1 e SHA-256 disponíveis em CHECKSUMS.txt.
           files: |
             dist/LoveMix-release.apk
             dist/CHECKSUMS.txt
@@ -528,6 +475,7 @@ jobs:
           prerelease: false
           fail_on_unmatched_files: true
 
+      # 20. Mostrar download e SHA
       - name: Mostrar download e SHA no Summary
         if: success()
         env:
@@ -543,35 +491,35 @@ jobs:
           RELEASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}"
 
           {
-            echo '# 💜 LoveMix'
+            echo "# 💜 LoveMix"
             echo
-            echo '## <span style="color:#a855f7">BUILD CONCLUÍDO</span>'
+            echo "## BUILD CONCLUÍDO COM SUCESSO"
             echo
-            echo "### 📥 [BAIXAR APK LOVEMIX]($RELEASE_URL)"
+            echo "### [📥 BAIXAR APK LOVEMIX]($RELEASE_URL)"
             echo
-            echo '### 🔐 SHA-1 do arquivo'
+            echo "### SHA-1 do arquivo"
             echo '```text'
             echo "$FILE_SHA1"
             echo '```'
             echo
-            echo '### 🔐 SHA-256 do arquivo'
+            echo "### SHA-256 do arquivo"
             echo '```text'
             echo "$FILE_SHA256"
             echo '```'
             echo
-            echo '### 📱 Certificado Firebase/Google'
+            echo "### Certificado Firebase/Google"
             echo
-            echo '**SHA-1:**'
+            echo "**SHA-1:**"
             echo '```text'
             echo "$CERT_SHA1"
             echo '```'
             echo
-            echo '**SHA-256:**'
+            echo "**SHA-256:**"
             echo '```text'
             echo "$CERT_SHA256"
             echo '```'
             echo
-            echo '### 📦 Arquivos publicados'
-            echo '- LoveMix-release.apk'
-            echo '- CHECKSUMS.txt'
+            echo "### Arquivos publicados"
+            echo "- LoveMix-release.apk"
+            echo "- CHECKSUMS.txt"
           } >> "$GITHUB_STEP_SUMMARY"
