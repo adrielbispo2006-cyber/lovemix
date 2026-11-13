@@ -1,0 +1,357 @@
+name: Gerar APK LoveMix com SHA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: lovemix-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Baixar projeto
+        uses: actions/checkout@v4
+
+      # Acha a pasta do projeto (raiz, subpasta ou dentro de um .zip)
+      - name: Localizar projeto Flutter
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROJECT_DIR=""
+
+          if [[ -f pubspec.yaml && -f lib/main.dart ]]; then
+            PROJECT_DIR="$PWD"
+          else
+            while IFS= read -r f; do
+              d="$(dirname "$f")"
+              if [[ -f "$d/lib/main.dart" && -d "$d/android" ]]; then
+                PROJECT_DIR="$(realpath "$d")"
+                break
+              fi
+            done < <(find . -maxdepth 4 -name pubspec.yaml \
+              -not -path './.git/*' -not -path '*/node_modules/*' | sort)
+          fi
+
+          if [[ -z "$PROJECT_DIR" ]]; then
+            ZIP="$(find . -maxdepth 2 -iname '*.zip' -not -path './.git/*' | sort | tail -n 1 || true)"
+            if [[ -n "$ZIP" ]]; then
+              mkdir -p /tmp/proj && unzip -q -o "$ZIP" -d /tmp/proj
+              while IFS= read -r f; do
+                d="$(dirname "$f")"
+                if [[ -f "$d/lib/main.dart" && -d "$d/android" ]]; then
+                  PROJECT_DIR="$(realpath "$d")"
+                  break
+                fi
+              done < <(find /tmp/proj -maxdepth 4 -name pubspec.yaml | sort)
+            fi
+          fi
+
+          if [[ -z "$PROJECT_DIR" ]]; then
+            echo "::error::Projeto Flutter (pubspec.yaml + lib/main.dart + android/) não encontrado."
+            exit 1
+          fi
+
+          for f in pubspec.yaml lib/main.dart lib/firebase_options.dart android/app/build.gradle android/app/google-services.json; do
+            if [[ ! -s "$PROJECT_DIR/$f" ]]; then
+              echo "::error::Arquivo obrigatório ausente no repositório: $f"
+              exit 1
+            fi
+          done
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Projeto: $PROJECT_DIR"
+
+      - name: Instalar Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Instalar Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      # O projeto usa AGP 9.1.1, que exige Gradle 9.3.1
+      - name: Instalar Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+          cache-read-only: false
+
+      - name: Aceitar licenças do Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          SDKMANAGER="$(find "$SDK/cmdline-tools" -type f -name sdkmanager 2>/dev/null | sort -V | tail -n 1 || true)"
+          if [[ -n "$SDKMANAGER" ]]; then
+            yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          else
+            mkdir -p "$SDK/licenses"
+            echo -e "\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > "$SDK/licenses/android-sdk-license"
+            echo -e "\n84831b9409646a918e30573bab4c9c91346d8abd" > "$SDK/licenses/android-sdk-preview-license"
+          fi
+
+      # O ZIP não traz o gradle-wrapper.jar; gera um oficial
+      - name: Gerar Gradle Wrapper 9.3.1
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+          TMP="$(mktemp -d)"
+          echo "tasks.register('noop')" > "$TMP/build.gradle"
+          (cd "$TMP" && gradle --no-daemon wrapper --gradle-version 9.3.1 --distribution-type bin)
+
+          mkdir -p android/gradle/wrapper
+          cp "$TMP/gradle/wrapper/gradle-wrapper.jar" android/gradle/wrapper/
+          cp "$TMP/gradlew" android/gradlew
+          cp "$TMP/gradlew.bat" android/gradlew.bat
+          chmod +x android/gradlew
+
+          cat > android/gradle/wrapper/gradle-wrapper.properties <<'PROPS'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-9.3.1-bin.zip
+          networkTimeout=120000
+          validateDistributionUrl=true
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          PROPS
+
+      - name: Baixar dependências (flutter pub get)
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: flutter pub get
+
+      # Plugins Zego antigos usam jcenter() (desativado) e o zego_zim pode não declarar o plugin Android
+      - name: Corrigir Gradle dos plugins Zego
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from urllib.parse import unquote, urlparse
+          import json, re
+
+          cfg = Path(".dart_tool/package_config.json")
+          data = json.loads(cfg.read_text())
+
+          def pkg_dir(p):
+              uri = p["rootUri"]
+              if uri.startswith("file://"):
+                  return Path(unquote(urlparse(uri).path))
+              return (cfg.parent / unquote(uri)).resolve()
+
+          for p in data["packages"]:
+              if not p["name"].startswith("zego"):
+                  continue
+              for name in ("build.gradle", "build.gradle.kts"):
+                  g = pkg_dir(p) / "android" / name
+                  if not g.exists():
+                      continue
+                  s = g.read_text()
+                  o = s
+                  s = re.sub(r"\bjcenter\s*\(\s*\)", "mavenCentral()", s)
+                  if p["name"] == "zego_zim" and name == "build.gradle":
+                      if not re.search(r"com\.android\.(library|application)", s):
+                          s = "apply plugin: 'com.android.library'\n" + s
+                  if s != o:
+                      g.write_text(s)
+                      print("Corrigido:", g)
+          PY
+
+      - name: Ler Google Client ID do google-services.json
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os
+          c = json.load(open("android/app/google-services.json"))
+          web = next((o["client_id"] for cl in c["client"]
+                      for o in cl.get("oauth_client", [])
+                      if str(o.get("client_type")) == "3"), "")
+          if not web:
+              print("::warning::google-services.json sem cliente OAuth WEB (client_type 3): login Google pode falhar.")
+          with open(os.environ["GITHUB_ENV"], "a") as f:
+              f.write(f"GOOGLE_SERVER_CLIENT_ID={web}\n")
+          PY
+
+      # Opcional: chave fixa (para o SHA-1 não mudar a cada build)
+      - name: Configurar assinatura (opcional)
+        shell: bash
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KS_KEYPASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${KS_B64:-}" || -z "${KS_PASS:-}" || -z "${KS_ALIAS:-}" || -z "${KS_KEYPASS:-}" ]]; then
+            echo "Sem secrets de assinatura: o APK será assinado com a chave debug (ok para testes)."
+            exit 0
+          fi
+          mkdir -p "$RUNNER_TEMP/sign"
+          printf '%s' "$KS_B64" | base64 --decode > "$RUNNER_TEMP/sign/release.jks"
+          test -s "$RUNNER_TEMP/sign/release.jks"
+          {
+            echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/sign/release.jks"
+            echo "ANDROID_KEYSTORE_PASSWORD=$KS_PASS"
+            echo "ANDROID_KEY_ALIAS=$KS_ALIAS"
+            echo "ANDROID_KEY_PASSWORD=$KS_KEYPASS"
+          } >> "$GITHUB_ENV"
+
+      # Corrige "zego_uikit_prebuilt_call is currently compiled against android-31".
+      # Em vez de depender do Gradle, edita direto o build.gradle de cada plugin
+      # e troca compileSdk menor que 33 por 37.
+      - name: Forçar compileSdk 37 nos plugins
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from urllib.parse import unquote, urlparse
+          import json, re
+
+          cfg = Path(".dart_tool/package_config.json")
+          data = json.loads(cfg.read_text())
+
+          def pkg_dir(p):
+              uri = p["rootUri"]
+              if uri.startswith("file://"):
+                  return Path(unquote(urlparse(uri).path))
+              return (cfg.parent / unquote(uri)).resolve()
+
+          pat = re.compile(r"(?m)^(\s*)(compileSdkVersion|compileSdk)(\s*=\s*|\s+)(\d+)\s*$")
+
+          def fix(m):
+              if int(m.group(4)) >= 33:
+                  return m.group(0)
+              if m.group(2) == "compileSdk":
+                  return f"{m.group(1)}compileSdk{m.group(3)}37"
+              return f"{m.group(1)}compileSdkVersion{m.group(3)}37"
+
+          changed = 0
+          for p in data["packages"]:
+              root = pkg_dir(p) / "android"
+              for name in ("build.gradle", "build.gradle.kts"):
+                  g = root / name
+                  if not g.exists():
+                      continue
+                  s = g.read_text()
+                  n = pat.sub(fix, s)
+                  if n != s:
+                      g.write_text(n)
+                      changed += 1
+                      print("compileSdk -> 37:", p["name"], name)
+                  if p["name"] == "zego_uikit_prebuilt_call":
+                      print("---", g)
+                      for line in n.splitlines():
+                          if "compileSdk" in line or "minSdk" in line:
+                              print(line)
+          print("Plugins alterados:", changed)
+          PY
+
+      - name: Compilar APK release
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            echo "Tentativa $attempt de 3..."
+            if flutter build apk --release \
+                 --dart-define=GOOGLE_SERVER_CLIENT_ID="${GOOGLE_SERVER_CLIENT_ID:-}"; then
+              exit 0
+            fi
+            [[ "$attempt" -lt 3 ]] && sleep 20
+          done
+          echo "::error::Falha ao gerar o APK após 3 tentativas."
+          exit 1
+
+      - name: Preparar APK e calcular SHA-1 / SHA-256
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+          test -s "$APK"
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp "$APK" "$GITHUB_WORKSPACE/dist/LoveMix.apk"
+          OUT="$GITHUB_WORKSPACE/dist/SHA-LoveMix.txt"
+
+          # AA:BB:CC... (formato que o Firebase pede)
+          fmt() { echo "$1" | tr 'a-f' 'A-F' | sed 's/../&:/g; s/:$//'; }
+
+          # SHA do arquivo APK
+          FILE_SHA1="$(sha1sum "$APK" | awk '{print $1}')"
+          FILE_SHA256="$(sha256sum "$APK" | awk '{print $1}')"
+
+          # SHA do certificado de assinatura (o que vai no Firebase)
+          APKSIGNER="$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n 1)"
+          CERTS="$("$APKSIGNER" verify --print-certs "$APK")"
+          CERT_SHA1_RAW="$(echo "$CERTS" | grep -m1 'certificate SHA-1 digest' | awk '{print $NF}')"
+          CERT_SHA256_RAW="$(echo "$CERTS" | grep -m1 'certificate SHA-256 digest' | awk '{print $NF}')"
+          [[ -n "$CERT_SHA1_RAW" && -n "$CERT_SHA256_RAW" ]] || { echo "::error::Não consegui ler o SHA do certificado."; echo "$CERTS"; exit 1; }
+          CERT_SHA1="$(fmt "$CERT_SHA1_RAW")"
+          CERT_SHA256="$(fmt "$CERT_SHA256_RAW")"
+
+          {
+            echo "=== SHA DO CERTIFICADO (cadastrar no Firebase) ==="
+            echo "SHA-1:   $CERT_SHA1"
+            echo "SHA-256: $CERT_SHA256"
+            echo
+            echo "=== SHA DO ARQUIVO LoveMix.apk ==="
+            echo "SHA-1:   $FILE_SHA1"
+            echo "SHA-256: $FILE_SHA256"
+          } | tee "$OUT"
+
+          {
+            echo "# 💜 LoveMix - APK gerado"
+            echo
+            echo "## SHA do certificado (Firebase)"
+            echo "**SHA-1**"
+            echo '```text'
+            echo "$CERT_SHA1"
+            echo '```'
+            echo "**SHA-256**"
+            echo '```text'
+            echo "$CERT_SHA256"
+            echo '```'
+            echo "Firebase Console > Configurações do projeto > Seus apps > Android > Adicionar impressão digital."
+            echo
+            echo "## SHA do arquivo APK"
+            echo "**SHA-1**"
+            echo '```text'
+            echo "$FILE_SHA1"
+            echo '```'
+            echo "**SHA-256**"
+            echo '```text'
+            echo "$FILE_SHA256"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "::notice title=SHA-1 do certificado::$CERT_SHA1"
+          echo "::notice title=SHA-256 do certificado::$CERT_SHA256"
+          ls -lh "$GITHUB_WORKSPACE/dist"
+
+      - name: Publicar APK e SHA
+        uses: actions/upload-artifact@v4
+        with:
+          name: LoveMix-APK-${{ github.run_number }}
+          path: |
+            dist/LoveMix.apk
+            dist/SHA-LoveMix.txt
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
