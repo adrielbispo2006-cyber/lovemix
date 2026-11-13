@@ -1,0 +1,92 @@
+name: Compilar APK - Projeto Moto JC
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar o código
+        uses: actions/checkout@v4
+
+      - name: Instalar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Instalar Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Preparar o projeto (acha o index.html em qualquer pasta)
+        run: |
+          for Z in $(find . -maxdepth 2 -name "*.zip" -not -path "./node_modules/*"); do
+            echo "Extraindo $Z"
+            unzip -oq "$Z" -d ./_extraido
+          done
+          SRC=$(find . -name index.html -not -path "./node_modules/*" -not -path "./android/*" | head -n 1)
+          if [ -z "$SRC" ]; then
+            echo "ERRO: index.html nao encontrado no repositorio"
+            ls -R
+            exit 1
+          fi
+          echo "Usando: $SRC"
+          mkdir -p www
+          if [ "$SRC" != "./www/index.html" ]; then cp "$SRC" www/index.html; fi
+          cat > package.json <<'JSON'
+          {
+            "name": "projeto-moto-jc",
+            "version": "1.0.0",
+            "private": true,
+            "dependencies": {
+              "@capacitor/android": "^6.1.2",
+              "@capacitor/cli": "^6.1.2",
+              "@capacitor/core": "^6.1.2",
+              "three": "0.160.0"
+            }
+          }
+          JSON
+          cat > capacitor.config.json <<'JSON'
+          {
+            "appId": "com.jc.projetomoto",
+            "appName": "Projeto Moto JC",
+            "webDir": "www"
+          }
+          JSON
+
+      - name: Instalar dependências
+        run: npm install
+
+      - name: Deixar o Three.js dentro do app (funciona sem internet)
+        run: |
+          cp node_modules/three/build/three.module.js www/three.module.js
+          sed -i "s#https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js#./three.module.js#" www/index.html
+          grep -n "three.module.js" www/index.html
+
+      - name: Criar projeto Android
+        run: npx cap add android
+
+      - name: Deixar o app em tela deitada (paisagem)
+        run: |
+          sed -i 's#<activity#<activity android:screenOrientation="landscape"#' android/app/src/main/AndroidManifest.xml
+
+      - name: Sincronizar arquivos do jogo
+        run: npx cap sync android
+
+      - name: Compilar APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Enviar APK para download
+        uses: actions/upload-artifact@v4
+        with:
+          name: ProjetoMotoJC-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
