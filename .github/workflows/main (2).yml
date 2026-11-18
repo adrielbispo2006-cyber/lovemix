@@ -1,54 +1,153 @@
 
-name: Gerar APK Nexora
+name: Gerar APK Appsdroid
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '*.zip'
+      - 'lib/**'
+      - 'assets/**'
+      - 'pubspec.yaml'
+      - '.github/workflows/**'
 
 permissions:
   contents: read
 
+concurrency:
+  group: appsdroid-build
+  cancel-in-progress: true
+
 jobs:
   build:
-    name: Compilar Nexora
+    name: Compilar Appsdroid
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
-      - name: Baixar código
+      - name: Baixar projeto
         uses: actions/checkout@v4
 
-      - name: Instalar Java 17
+      - name: Configurar Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Instalar Flutter
+      - name: Configurar Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
-      - name: Preparar Android
-        run: flutter create . --platforms=android
+      - name: Preparar arquivos do Appsdroid
+        shell: bash
+        run: |
+          set -e
+
+          ZIP_FILE=$(find . -maxdepth 1 -type f -iname '*.zip' | head -n 1)
+
+          if [ -n "$ZIP_FILE" ]; then
+            mkdir -p /tmp/appsdroid_source
+            unzip -q "$ZIP_FILE" -d /tmp/appsdroid_source
+
+            PROJECT_DIR=$(find /tmp/appsdroid_source -name pubspec.yaml -type f -printf '%h\n' | head -n 1)
+
+            if [ -z "$PROJECT_DIR" ]; then
+              echo "ERRO: pubspec.yaml não encontrado no ZIP."
+              exit 1
+            fi
+
+            cp -a "$PROJECT_DIR"/. "$GITHUB_WORKSPACE"/
+          fi
+
+          if [ ! -f pubspec.yaml ]; then
+            echo "ERRO: Projeto Flutter não encontrado."
+            exit 1
+          fi
+
+      - name: Configurar ícone Appsdroid
+        shell: bash
+        run: |
+          set -e
+
+          if [ ! -f assets/appsdroid_wallpaper.png ]; then
+            echo "Imagem do ícone não encontrada."
+            exit 1
+          fi
+
+          cp assets/appsdroid_wallpaper.png assets/appsdroid_icon.png
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("pubspec.yaml")
+          s = p.read_text()
+
+          if "flutter_launcher_icons:" not in s:
+              s = s.replace(
+                  "  flutter_lints: ^4.0.0",
+                  "  flutter_lints: ^4.0.0\n  flutter_launcher_icons: ^0.14.3"
+              )
+
+              s += """
+          
+          flutter_launcher_icons:
+            android: true
+            ios: false
+            image_path: assets/appsdroid_icon.png
+            adaptive_icon_background: "#100D16"
+            adaptive_icon_foreground: assets/appsdroid_icon.png
+          """
+
+          if "assets/appsdroid_icon.png" not in s:
+              s = s.replace(
+                  "    - assets/appsdroid_wallpaper.png",
+                  "    - assets/appsdroid_wallpaper.png\n    - assets/appsdroid_icon.png"
+              )
+
+          p.write_text(s)
+          PY
+
+      - name: Criar estrutura Android
+        run: flutter create --platforms=android --project-name appsdroid .
 
       - name: Instalar dependências
         run: flutter pub get
 
-      - name: Compilar APK
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
-        run: |
-          flutter build apk --release \
-            --dart-define=SUPABASE_URL="$SUPABASE_URL" \
-            --dart-define=SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY"
+      - name: Gerar ícone Android
+        run: dart run flutter_launcher_icons
 
-      - name: Salvar APK
+      - name: Compilar APK Release
+        run: flutter build apk --release
+
+      - name: Calcular SHA-1 e SHA-256
+        shell: bash
+        run: |
+          cd build/app/outputs/flutter-apk
+          sha1sum app-release.apk
+          sha256sum app-release.apk
+
+      - name: Mostrar resumo da compilação
+        shell: bash
+        run: |
+          echo "## Appsdroid - APK gerado" >> $GITHUB_STEP_SUMMARY
+          echo "Compilação concluída." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Arquivo: app-release.apk" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          cd build/app/outputs/flutter-apk
+          echo '### SHA-1' >> $GITHUB_STEP_SUMMARY
+          sha1sum app-release.apk >> $GITHUB_STEP_SUMMARY
+          echo '### SHA-256' >> $GITHUB_STEP_SUMMARY
+          sha256sum app-release.apk >> $GITHUB_STEP_SUMMARY
+
+      - name: Disponibilizar APK para download
         uses: actions/upload-artifact@v4
         with:
-          name: Nexora-APK
+          name: Appsdroid-APK
           path: build/app/outputs/flutter-apk/app-release.apk
-          retention-days: 30
+          if-no-files-found: error
+          retention-days: 14
