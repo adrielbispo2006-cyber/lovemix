@@ -37,13 +37,13 @@ jobs:
         run: |
           set -e
 
-          if [ -f "pubspec.yaml" ]; then
+          if [ -f pubspec.yaml ]; then
             PROJECT_DIR="."
           else
             ZIP=$(find . -maxdepth 1 -type f -iname '*.zip' | head -n 1)
 
             if [ -z "$ZIP" ]; then
-              echo "ERRO: Nenhum ZIP encontrado."
+              echo "ERRO: ZIP não encontrado."
               exit 1
             fi
 
@@ -75,29 +75,24 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Gerar estrutura Android ausente
-        working-directory: ${{ env.PROJECT_DIR }}
+      - name: Gerar estrutura Android
         shell: bash
         run: |
           set -e
+          cd "$PROJECT_DIR"
 
           if [ ! -f android/app/build.gradle ] && \
              [ ! -f android/app/build.gradle.kts ]; then
-
-            echo "Gerando projeto Android do Flutter..."
-
             flutter create \
               --platforms=android \
               --org com.appsdroid \
               --project-name appsdroid \
               .
-          else
-            echo "Estrutura Android já existe."
           fi
 
           test -f android/app/src/main/AndroidManifest.xml
 
-      - name: Instalar Android SDK API 36
+      - name: Instalar Android SDK 36
         shell: bash
         run: |
           set -e
@@ -117,78 +112,128 @@ jobs:
             "platforms;android-36" \
             "build-tools;36.0.0"
 
-      - name: Atualizar compileSdk para 36
-        working-directory: ${{ env.PROJECT_DIR }}
+      - name: Instalar dependências Flutter
         shell: bash
         run: |
+          set -e
+          cd "$PROJECT_DIR"
+          flutter pub get
+
+      - name: Corrigir compileSdk do App e Plugins
+        shell: bash
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+
           python3 - <<'PY'
           from pathlib import Path
+          import os
           import re
 
-          candidates = [
-              Path("android/app/build.gradle"),
-              Path("android/app/build.gradle.kts")
-          ]
+          roots = [Path("android")]
 
-          gradle = next((p for p in candidates if p.is_file()), None)
+          cache = Path(
+              os.environ.get(
+                  "PUB_CACHE",
+                  str(Path.home() / ".pub-cache")
+              )
+          )
 
-          if gradle is None:
-              raise SystemExit("Arquivo Gradle não encontrado.")
-
-          content = gradle.read_text()
+          if cache.exists():
+              roots.append(cache)
 
           patterns = [
               (r'compileSdkVersion\s+flutter\.compileSdkVersion',
                'compileSdkVersion 36'),
               (r'compileSdk\s*=\s*flutter\.compileSdkVersion',
                'compileSdk = 36'),
+              (r'compileSdk\s+flutter\.compileSdkVersion',
+               'compileSdk 36'),
               (r'compileSdkVersion\s+\d+',
                'compileSdkVersion 36'),
               (r'compileSdk\s*=\s*\d+',
                'compileSdk = 36'),
-              (r'compileSdk\s+flutter\.compileSdkVersion',
+              (r'compileSdk\s+\d+',
                'compileSdk 36')
           ]
 
-          changed = False
+          checked = 0
+          changed = 0
 
-          for pattern, replacement in patterns:
-              content, count = re.subn(
-                  pattern, replacement, content
-              )
-              changed = changed or count > 0
+          for root in roots:
+              if not root.exists():
+                  continue
 
-          if not changed:
-              raise SystemExit(
-                  "Não foi possível configurar compileSdk."
-              )
+              for file in root.rglob("*"):
+                  if file.name not in (
+                      "build.gradle",
+                      "build.gradle.kts"
+                  ):
+                      continue
 
-          gradle.write_text(content)
+                  checked += 1
 
-          print(f"{gradle}: compileSdk 36 configurado.")
+                  try:
+                      content = file.read_text()
+                  except (OSError, UnicodeError):
+                      continue
+
+                  original = content
+
+                  for pattern, replacement in patterns:
+                      content = re.sub(
+                          pattern,
+                          replacement,
+                          content
+                      )
+
+                  if content != original:
+                      file.write_text(content)
+                      changed += 1
+                      print("Atualizado:", file)
+
+          print("Gradle verificados:", checked)
+          print("Gradle atualizados:", changed)
+
+          if not Path("android/app").exists():
+              raise SystemExit("Pasta android/app não encontrada.")
           PY
 
-      - name: Instalar dependências
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: flutter pub get
-
-      - name: Verificar Flutter
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: flutter doctor -v
+      - name: Verificar configuração
+        shell: bash
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+          flutter doctor -v
+          grep -R "compileSdk" android/app
 
       - name: Compilar APK Release
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: flutter build apk --release
+        shell: bash
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+          flutter build apk --release
 
-      - name: Calcular SHA-1 e SHA-256
-        working-directory: ${{ env.PROJECT_DIR }}
+      - name: Preparar APK
         shell: bash
         run: |
           set -e
 
-          APK="build/app/outputs/flutter-apk/app-release.apk"
+          APK="$PROJECT_DIR/build/app/outputs/flutter-apk/app-release.apk"
 
           test -f "$APK"
+
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp "$APK" "$GITHUB_WORKSPACE/dist/app-release.apk"
+
+          ls -lh "$GITHUB_WORKSPACE/dist/app-release.apk"
+
+      - name: Calcular SHA-1 e SHA-256
+        shell: bash
+        run: |
+          set -e
+
+          APK="dist/app-release.apk"
 
           SHA1=$(sha1sum "$APK" | awk '{print $1}')
           SHA256=$(sha256sum "$APK" | awk '{print $1}')
@@ -207,6 +252,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Appsdroid-APK-Release
-          path: ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/app-release.apk
+          path: dist/app-release.apk
           if-no-files-found: error
           retention-days: 14
