@@ -7,10 +7,11 @@ on:
     branches:
       - main
     paths:
-      - '*.zip'
-      - 'lib/**'
-      - 'assets/**'
+      - '**/*.dart'
       - 'pubspec.yaml'
+      - 'pubspec.lock'
+      - 'android/**'
+      - 'assets/**'
       - '.github/workflows/**'
 
 permissions:
@@ -35,6 +36,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle
 
       - name: Configurar Flutter
         uses: subosito/flutter-action@v2
@@ -42,112 +44,75 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Preparar arquivos do Appsdroid
-        shell: bash
+      - name: Instalar Android SDK API 36
         run: |
-          set -e
-
-          ZIP_FILE=$(find . -maxdepth 1 -type f -iname '*.zip' | head -n 1)
-
-          if [ -n "$ZIP_FILE" ]; then
-            mkdir -p /tmp/appsdroid_source
-            unzip -q "$ZIP_FILE" -d /tmp/appsdroid_source
-
-            PROJECT_DIR=$(find /tmp/appsdroid_source -name pubspec.yaml -type f -printf '%h\n' | head -n 1)
-
-            if [ -z "$PROJECT_DIR" ]; then
-              echo "ERRO: pubspec.yaml não encontrado no ZIP."
-              exit 1
-            fi
-
-            cp -a "$PROJECT_DIR"/. "$GITHUB_WORKSPACE"/
+          SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "${ANDROID_HOME}/cmdline-tools" -type f -name sdkmanager | head -n 1)"
           fi
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses || true
+          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0"
 
-          if [ ! -f pubspec.yaml ]; then
-            echo "ERRO: Projeto Flutter não encontrado."
-            exit 1
-          fi
-
-      - name: Configurar ícone Appsdroid
-        shell: bash
+      - name: Atualizar compileSdk para 36
         run: |
-          set -e
-
-          if [ ! -f assets/appsdroid_wallpaper.png ]; then
-            echo "Imagem do ícone não encontrada."
-            exit 1
-          fi
-
-          cp assets/appsdroid_wallpaper.png assets/appsdroid_icon.png
-
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
-          p = Path("pubspec.yaml")
-          s = p.read_text()
+          files = [
+              Path('android/app/build.gradle'),
+              Path('android/app/build.gradle.kts')
+          ]
 
-          if "flutter_launcher_icons:" not in s:
-              s = s.replace(
-                  "  flutter_lints: ^4.0.0",
-                  "  flutter_lints: ^4.0.0\n  flutter_launcher_icons: ^0.14.3"
-              )
+          f = next((p for p in files if p.exists()), None)
+          if f is None:
+              raise SystemExit('Arquivo Gradle Android não encontrado')
 
-              s += """
-          
-          flutter_launcher_icons:
-            android: true
-            ios: false
-            image_path: assets/appsdroid_icon.png
-            adaptive_icon_background: "#100D16"
-            adaptive_icon_foreground: assets/appsdroid_icon.png
-          """
+          s = f.read_text()
+          s, n1 = re.subn(
+              r'compileSdkVersion\s+flutter.compileSdkVersion',
+              'compileSdkVersion 36', s)
+          s, n2 = re.subn(
+              r'compileSdk\s*=\s*flutter.compileSdkVersion',
+              'compileSdk = 36', s)
+          s, n3 = re.subn(
+              r'compileSdkVersion\s+\d+',
+              'compileSdkVersion 36', s)
+          s, n4 = re.subn(
+              r'compileSdk\s*=\s*\d+',
+              'compileSdk = 36', s)
 
-          if "assets/appsdroid_icon.png" not in s:
-              s = s.replace(
-                  "    - assets/appsdroid_wallpaper.png",
-                  "    - assets/appsdroid_wallpaper.png\n    - assets/appsdroid_icon.png"
-              )
+          if not n1 + n2 + n3 + n4:
+              raise SystemExit('Não foi possível atualizar compileSdk')
 
-          p.write_text(s)
+          f.write_text(s)
+          print('compileSdk atualizado para 36')
           PY
-
-      - name: Criar estrutura Android
-        run: flutter create --platforms=android --project-name appsdroid .
 
       - name: Instalar dependências
         run: flutter pub get
 
-      - name: Gerar ícone Android
-        run: dart run flutter_launcher_icons
+      - name: Verificar código
+        run: flutter analyze
 
-      - name: Compilar APK Release
+      - name: Compilar APK
         run: flutter build apk --release
 
       - name: Calcular SHA-1 e SHA-256
-        shell: bash
         run: |
-          cd build/app/outputs/flutter-apk
-          sha1sum app-release.apk
-          sha256sum app-release.apk
-
-      - name: Mostrar resumo da compilação
-        shell: bash
-        run: |
-          echo "## Appsdroid - APK gerado" >> $GITHUB_STEP_SUMMARY
-          echo "Compilação concluída." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Arquivo: app-release.apk" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          cd build/app/outputs/flutter-apk
-          echo '### SHA-1' >> $GITHUB_STEP_SUMMARY
-          sha1sum app-release.apk >> $GITHUB_STEP_SUMMARY
-          echo '### SHA-256' >> $GITHUB_STEP_SUMMARY
-          sha256sum app-release.apk >> $GITHUB_STEP_SUMMARY
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+          test -f "$APK"
+          SHA1=$(sha1sum "$APK" | awk '{print $1}')
+          SHA256=$(sha256sum "$APK" | awk '{print $1}')
+          echo "## APK Appsdroid" >> "$GITHUB_STEP_SUMMARY"
+          echo "- SHA-1: $SHA1" >> "$GITHUB_STEP_SUMMARY"
+          echo "- SHA-256: $SHA256" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Disponibilizar APK para download
         uses: actions/upload-artifact@v4
         with:
-          name: Appsdroid-APK
+          name: Appsdroid-APK-release
           path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
           retention-days: 14
