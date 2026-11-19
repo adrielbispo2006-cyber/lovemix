@@ -30,12 +30,11 @@ jobs:
         uses: android-actions/setup-android@v4
         with:
           packages: 'platform-tools'
-          accept-android-sdk-licenses: 'yes'
+          accept-android-sdk-licenses: true
 
       - name: Instalar SDK 36
         run: |
           sdkmanager "platforms;android-36" "build-tools;36.0.0"
-          sdkmanager --licenses
 
       - name: Configurar Flutter
         uses: subosito/flutter-action@v2
@@ -59,13 +58,17 @@ jobs:
               echo "Nenhum ZIP encontrado"
               exit 1
             fi
+
             mkdir -p extraido
             unzip -q "$ZIP" -d extraido
+
             PUBSPEC=$(find extraido -name pubspec.yaml -type f | head -n 1)
+
             if [ -z "$PUBSPEC" ]; then
               echo "pubspec.yaml não encontrado"
               exit 1
             fi
+
             echo "dir=$(dirname "$PUBSPEC")" >> "$GITHUB_OUTPUT"
           fi
 
@@ -87,20 +90,29 @@ jobs:
               Path("android/app/build.gradle"),
               Path("android/app/build.gradle.kts")
           ]
+
           f = next((x for x in files if x.exists()), None)
+
           if f is None:
               raise SystemExit("Arquivo Gradle não encontrado")
 
           s = f.read_text()
+
           s, n = re.subn(
               r'(?m)^(\s*)compileSdkVersion\s*(?:=\s*)?(?:flutter\.compileSdkVersion|\d+)',
-              r'\1compileSdk = 36', s, count=1
+              r'\1compileSdk = 36',
+              s,
+              count=1
           )
+
           if n == 0:
               s, n = re.subn(
                   r'(?m)^(\s*)compileSdk\s*(?:=\s*)?(?:flutter\.compileSdkVersion|\d+)',
-                  r'\1compileSdk = 36', s, count=1
+                  r'\1compileSdk = 36',
+                  s,
+                  count=1
               )
+
           if n == 0:
               raise SystemExit("Não foi possível localizar compileSdk")
 
@@ -116,7 +128,8 @@ jobs:
 
       - name: Compilar APK
         working-directory: ${{ steps.project.outputs.dir }}
-        run: flutter build apk --release
+        run: |
+          flutter build apk --release
 
       - name: Verificar APK
         working-directory: ${{ steps.project.outputs.dir }}
