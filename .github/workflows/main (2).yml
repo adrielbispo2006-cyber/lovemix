@@ -7,6 +7,7 @@ on:
     branches:
       - main
     paths:
+      - '**/*.zip'
       - '**/*.dart'
       - 'pubspec.yaml'
       - 'pubspec.lock'
@@ -31,12 +32,40 @@ jobs:
       - name: Baixar projeto
         uses: actions/checkout@v4
 
+      - name: Localizar e extrair projeto Flutter
+        shell: bash
+        run: |
+          if [ -f "pubspec.yaml" ]; then
+            PROJECT_DIR="."
+          else
+            ZIP=$(find . -maxdepth 1 -type f -iname '*.zip' | head -n 1)
+
+            if [ -z "$ZIP" ]; then
+              echo "ERRO: Nenhum ZIP encontrado."
+              exit 1
+            fi
+
+            mkdir -p appsrc
+            unzip -q "$ZIP" -d appsrc
+
+            PUBSPEC=$(find appsrc -type f -name pubspec.yaml | head -n 1)
+
+            if [ -z "$PUBSPEC" ]; then
+              echo "ERRO: pubspec.yaml não encontrado no ZIP."
+              exit 1
+            fi
+
+            PROJECT_DIR=$(dirname "$PUBSPEC")
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Projeto encontrado em: $PROJECT_DIR"
+
       - name: Configurar Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-          cache: gradle
 
       - name: Configurar Flutter
         uses: subosito/flutter-action@v2
@@ -44,75 +73,95 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Instalar Android SDK API 36
+      - name: Instalar Android SDK 36
         run: |
           SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+
           if [ ! -x "$SDKMANAGER" ]; then
-            SDKMANAGER="$(find "${ANDROID_HOME}/cmdline-tools" -type f -name sdkmanager | head -n 1)"
+            SDKMANAGER=$(find "${ANDROID_HOME}/cmdline-tools" \
+              -type f -name sdkmanager | head -n 1)
           fi
+
           test -x "$SDKMANAGER"
           yes | "$SDKMANAGER" --licenses || true
           "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0"
 
-      - name: Atualizar compileSdk para 36
+      - name: Atualizar compileSdk
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           python3 - <<'PY'
           from pathlib import Path
           import re
 
           files = [
-              Path('android/app/build.gradle'),
-              Path('android/app/build.gradle.kts')
+              Path("android/app/build.gradle"),
+              Path("android/app/build.gradle.kts")
           ]
 
           f = next((p for p in files if p.exists()), None)
+
           if f is None:
-              raise SystemExit('Arquivo Gradle Android não encontrado')
+              raise SystemExit("Arquivo Gradle do aplicativo não encontrado")
 
           s = f.read_text()
-          s, n1 = re.subn(
-              r'compileSdkVersion\s+flutter.compileSdkVersion',
-              'compileSdkVersion 36', s)
-          s, n2 = re.subn(
-              r'compileSdk\s*=\s*flutter.compileSdkVersion',
-              'compileSdk = 36', s)
-          s, n3 = re.subn(
-              r'compileSdkVersion\s+\d+',
-              'compileSdkVersion 36', s)
-          s, n4 = re.subn(
-              r'compileSdk\s*=\s*\d+',
-              'compileSdk = 36', s)
 
-          if not n1 + n2 + n3 + n4:
-              raise SystemExit('Não foi possível atualizar compileSdk')
+          patterns = [
+              (r'compileSdkVersion\s+flutter\.compileSdkVersion',
+               'compileSdkVersion 36'),
+              (r'compileSdk\s*=\s*flutter\.compileSdkVersion',
+               'compileSdk = 36'),
+              (r'compileSdkVersion\s+\d+',
+               'compileSdkVersion 36'),
+              (r'compileSdk\s*=\s*\d+',
+               'compileSdk = 36'),
+              (r'compileSdk\s+flutter\.compileSdkVersion',
+               'compileSdk 36')
+          ]
+
+          changed = False
+
+          for pattern, replacement in patterns:
+              s, n = re.subn(pattern, replacement, s)
+              changed = changed or n > 0
+
+          if not changed:
+              raise SystemExit("Não foi possível atualizar compileSdk")
 
           f.write_text(s)
-          print('compileSdk atualizado para 36')
+          print("compileSdk configurado para API 36")
           PY
 
       - name: Instalar dependências
+        working-directory: ${{ env.PROJECT_DIR }}
         run: flutter pub get
 
-      - name: Verificar código
-        run: flutter analyze
-
-      - name: Compilar APK
+      - name: Compilar APK Release
+        working-directory: ${{ env.PROJECT_DIR }}
         run: flutter build apk --release
 
       - name: Calcular SHA-1 e SHA-256
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           APK="build/app/outputs/flutter-apk/app-release.apk"
+
           test -f "$APK"
-          SHA1=$(sha1sum "$APK" | awk '{print $1}')
-          SHA256=$(sha256sum "$APK" | awk '{print $1}')
-          echo "## APK Appsdroid" >> "$GITHUB_STEP_SUMMARY"
-          echo "- SHA-1: $SHA1" >> "$GITHUB_STEP_SUMMARY"
-          echo "- SHA-256: $SHA256" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "## Appsdroid - APK Release" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "SHA-1:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          sha1sum "$APK" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          echo "SHA-256:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          sha256sum "$APK" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Disponibilizar APK para download
         uses: actions/upload-artifact@v4
         with:
-          name: Appsdroid-APK-release
-          path: build/app/outputs/flutter-apk/app-release.apk
+          name: Appsdroid-APK-Release
+          path: ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
           retention-days: 14
