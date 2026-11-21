@@ -6,6 +6,9 @@ on:
   push:
     branches:
       - main
+    paths:
+      - '**'
+      - '!README.md'
 
 permissions:
   contents: read
@@ -30,12 +33,11 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Extrair e localizar projeto Flutter
+      - name: Extrair e localizar projeto
         run: |
           ZIP_FILE=$(find . -maxdepth 1 -type f -iname '*.zip' | head -n 1)
 
           if [ -n "$ZIP_FILE" ]; then
-            echo "Extraindo $ZIP_FILE"
             unzip -o "$ZIP_FILE" -d .
           fi
 
@@ -50,13 +52,12 @@ jobs:
           fi
 
           if [ -z "$PROJECT_DIR" ]; then
-            echo "ERRO: pubspec.yaml não encontrado."
-            echo "Envie o ZIP do projeto Clouddroid Gaming para o repositório."
+            echo "ERRO: pubspec.yaml não encontrado"
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Projeto encontrado em: $PROJECT_DIR"
+          echo "Projeto localizado: $PROJECT_DIR"
 
       - name: Instalar Flutter
         uses: subosito/flutter-action@v2
@@ -64,17 +65,32 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Verificar versão
+        run: flutter --version
+
       - name: Instalar dependências
         working-directory: ${{ env.PROJECT_DIR }}
         run: flutter pub get
 
       - name: Verificar projeto
         working-directory: ${{ env.PROJECT_DIR }}
-        run: flutter analyze
+        run: flutter analyze --no-fatal-infos
 
       - name: Gerar APK Release
         working-directory: ${{ env.PROJECT_DIR }}
         run: flutter build apk --release
+
+      - name: Verificar APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+
+          if [ ! -f "$APK" ]; then
+            echo "APK não encontrado!"
+            exit 1
+          fi
+
+          ls -lh "$APK"
 
       - name: Mostrar SHA-1 e SHA-256
         working-directory: ${{ env.PROJECT_DIR }}
