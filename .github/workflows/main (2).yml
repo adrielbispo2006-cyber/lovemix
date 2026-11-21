@@ -30,6 +30,34 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Extrair e localizar projeto Flutter
+        run: |
+          ZIP_FILE=$(find . -maxdepth 1 -type f -iname '*.zip' | head -n 1)
+
+          if [ -n "$ZIP_FILE" ]; then
+            echo "Extraindo $ZIP_FILE"
+            unzip -o "$ZIP_FILE" -d .
+          fi
+
+          if [ -f "./ClouddroidGaming/pubspec.yaml" ]; then
+            PROJECT_DIR="./ClouddroidGaming"
+          elif [ -f "./pubspec.yaml" ]; then
+            PROJECT_DIR="."
+          else
+            PROJECT_DIR=$(find . -name pubspec.yaml \
+              -not -path './.git/*' \
+              -print -quit | xargs -r dirname)
+          fi
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERRO: pubspec.yaml não encontrado."
+            echo "Envie o ZIP do projeto Clouddroid Gaming para o repositório."
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Projeto encontrado em: $PROJECT_DIR"
+
       - name: Instalar Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -37,15 +65,19 @@ jobs:
           cache: true
 
       - name: Instalar dependências
+        working-directory: ${{ env.PROJECT_DIR }}
         run: flutter pub get
 
       - name: Verificar projeto
+        working-directory: ${{ env.PROJECT_DIR }}
         run: flutter analyze
 
-      - name: Gerar APK
+      - name: Gerar APK Release
+        working-directory: ${{ env.PROJECT_DIR }}
         run: flutter build apk --release
 
       - name: Mostrar SHA-1 e SHA-256
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           cd build/app/outputs/flutter-apk
           sha1sum app-release.apk
@@ -55,5 +87,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Clouddroid-Gaming-APK
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
