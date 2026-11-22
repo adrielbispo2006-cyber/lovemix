@@ -1,0 +1,106 @@
+name: Vida Real RP - Compilar APK Android
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Gerar APK do Vida Real RP
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar projeto
+        uses: actions/checkout@v4
+
+      - name: Localizar projeto Godot
+        run: |
+          FILE=$(find . -name project.godot -not -path "./.git/*" | head -n 1)
+          if [ -z "$FILE" ]; then
+            echo "::error::project.godot NAO encontrado no repositorio. Arquivos enviados:"
+            find . -not -path "./.git/*" -type f | head -n 50
+            exit 1
+          fi
+          DIR=$(dirname "$FILE")
+          echo "Projeto Godot encontrado em: $DIR"
+          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
+
+      - name: Configurar Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Configurar Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: ''
+
+      - name: Instalar componentes Android
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      - name: Instalar Godot 4.4.1 e templates
+        uses: chickensoft-games/setup-godot@v2
+        with:
+          version: 4.4.1
+          use-dotnet: false
+          include-templates: true
+
+      - name: Configurar Godot para exportar Android
+        run: |
+          keytool -genkeypair -v \
+            -keystore "$HOME/debug.keystore" \
+            -storepass android -keypass android \
+            -alias androiddebugkey \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+          mkdir -p "$HOME/.config/godot"
+          cat > "$HOME/.config/godot/editor_settings-4.4.tres" <<EOF
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/android_sdk_path = "$ANDROID_HOME"
+          export/android/java_sdk_path = "$JAVA_HOME"
+          export/android/debug_keystore = "$HOME/debug.keystore"
+          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore_pass = "android"
+          EOF
+
+      - name: Verificar arquivos do projeto
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          test -f project.godot || { echo "::error::project.godot faltando"; exit 1; }
+          test -f export_presets.cfg || { echo "::error::export_presets.cfg faltando. Crie em Projeto > Exportar > Adicionar > Android e envie ao repositorio."; exit 1; }
+          test -f icon.png || echo "::warning::icon.png nao encontrado"
+          echo "Arquivos encontrados."
+
+      - name: Importar projeto
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          godot --headless --editor --path . --quit
+
+      - name: Compilar APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          mkdir -p build
+          godot --headless --path . \
+            --export-debug "Android" \
+            build/VidaRealRP.apk
+
+      - name: Publicar APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: VidaRealRP-APK-Android
+          path: ${{ env.PROJECT_DIR }}/build/VidaRealRP.apk
+          if-no-files-found: error
+          retention-days: 14
