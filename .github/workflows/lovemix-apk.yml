@@ -23,7 +23,7 @@ concurrency:
 
 env:
   JAVA_VERSION: '17'
-  ANDROID_PLATFORM: '37'
+  ANDROID_PLATFORM: '36'
   ANDROID_BUILD_TOOLS: '36.0.0'
 
 jobs:
@@ -52,6 +52,7 @@ jobs:
             fi
 
             mkdir -p "$GITHUB_WORKSPACE/extracted"
+
             unzip -q -o "$ZIP_FILE" -d "$GITHUB_WORKSPACE/extracted" -x '__MACOSX/*'
 
             PUBSPEC="$(find "$GITHUB_WORKSPACE/extracted" -type f -name pubspec.yaml \
@@ -97,14 +98,17 @@ jobs:
 
           SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager 2>/dev/null | sort -V | tail -n 1 || true)"
 
-          if [[ -n "$SDKMANAGER" ]]; then
-            yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
-
-            "$SDKMANAGER" \
-              "platforms;android-${ANDROID_PLATFORM}" \
-              "build-tools;${ANDROID_BUILD_TOOLS}" \
-              "platform-tools"
+          if [[ -z "$SDKMANAGER" ]]; then
+            echo "::error::sdkmanager não encontrado."
+            exit 1
           fi
+
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+
+          "$SDKMANAGER" \
+            "platforms;android-${ANDROID_PLATFORM}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}" \
+            "platform-tools"
 
       - name: Configurar Android local.properties
         working-directory: ${{ env.PROJECT_DIR }}
@@ -131,7 +135,9 @@ jobs:
           cache = Path.home() / ".pub-cache/hosted/pub.dev"
 
           for android_dir in cache.glob("zego_*/android"):
-              for f in list(android_dir.glob("*.gradle")) + list(android_dir.glob("*.gradle.kts")):
+              files = list(android_dir.glob("*.gradle")) + list(android_dir.glob("*.gradle.kts"))
+
+              for f in files:
                   old = f.read_text()
                   new = re.sub(r"\bjcenter\s*\(\s*\)", "mavenCentral()", old)
 
@@ -205,6 +211,7 @@ jobs:
           OUT="$("$APKSIGNER" verify --print-certs "$APK" 2>&1 || true)"
 
           SHA1="$(echo "$OUT" | sed -n 's/.*certificate SHA-1 digest: *//p' | head -n 1)"
+
           SHA256="$(echo "$OUT" | sed -n 's/.*certificate SHA-256 digest: *//p' | head -n 1)"
 
           {
