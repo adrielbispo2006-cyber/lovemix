@@ -1,5 +1,5 @@
 
-name: LoveMix - Compilar APK e gerar SHA
+name: LoveMix - Compilar APK e gerar SHA1 SHA256
 
 on:
   workflow_dispatch:
@@ -26,34 +26,65 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Localizar projeto Flutter
+      - name: Localizar e extrair projeto
+        shell: bash
         run: |
-          PROJECT_DIR=$(find . -name pubspec.yaml \
-            -not -path '*/.dart_tool/*' \
-            -not -path '*/build/*' \
-            -print -quit | xargs -r dirname)
+          set -euo pipefail
 
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "ERRO: pubspec.yaml não encontrado."
+          ROOT="$GITHUB_WORKSPACE"
+          SEARCH="$ROOT"
+
+          if ! find "$SEARCH" -name pubspec.yaml \
+            -not -path '*/build/*' \
+            -not -path '*/.dart_tool/*' | grep -q .; then
+
+            ZIP_FILE=$(find "$ROOT" -maxdepth 4 \
+              -type f -iname '*.zip' | head -n 1)
+
+            if [ -z "$ZIP_FILE" ]; then
+              echo "::error::Nenhum pubspec.yaml ou ZIP encontrado."
+              exit 1
+            fi
+
+            mkdir -p "$ROOT/extracted"
+            unzip -q -o "$ZIP_FILE" -d "$ROOT/extracted"
+            SEARCH="$ROOT/extracted"
+          fi
+
+          PUBSPEC=$(find "$SEARCH" -name pubspec.yaml \
+            -not -path '*/build/*' \
+            -not -path '*/.dart_tool/*' | head -n 1)
+
+          if [ -z "$PUBSPEC" ]; then
+            echo "::error::pubspec.yaml não encontrado."
             exit 1
           fi
 
-          echo "Projeto encontrado em: $PROJECT_DIR"
+          PROJECT_DIR=$(dirname "$PUBSPEC")
+
+          test -f "$PROJECT_DIR/lib/main.dart"
+          test -d "$PROJECT_DIR/android"
+
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Projeto encontrado: $PROJECT_DIR"
 
       - name: Instalar dependências
-        run: |
-          cd "$PROJECT_DIR"
-          flutter pub get
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: flutter pub get
 
       - name: Compilar APK
-        run: |
-          cd "$PROJECT_DIR"
-          flutter build apk --debug
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: flutter build apk --debug
 
       - name: Gerar SHA1 e SHA256
+        shell: bash
         run: |
+          set -euo pipefail
+
           APK="$PROJECT_DIR/build/app/outputs/flutter-apk/app-debug.apk"
+
+          test -s "$APK"
+
           APKSIGNER=$(find "$ANDROID_HOME/build-tools" \
             -name apksigner -type f | sort -V | tail -n 1)
 
@@ -61,7 +92,7 @@ jobs:
             | tee "$GITHUB_WORKSPACE/fingerprints.txt"
 
           {
-            echo "## SHA-1 e SHA-256"
+            echo "## SHA1 e SHA256 do APK"
             cat "$GITHUB_WORKSPACE/fingerprints.txt"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -70,5 +101,5 @@ jobs:
         with:
           name: LoveMix-APK-SHA
           path: |
-            **/build/app/outputs/flutter-apk/app-debug.apk
+            ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/app-debug.apk
             fingerprints.txt
