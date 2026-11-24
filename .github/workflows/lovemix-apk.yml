@@ -17,29 +17,39 @@ jobs:
     timeout-minutes: 60
 
     steps:
+      # Baixar projeto
       - name: Baixar projeto
         uses: actions/checkout@v4
 
+      # Java 21
       - name: Configurar Java 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
 
+      # Flutter
       - name: Configurar Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
-      # Não usar setup-android: o runner já possui SDK.
+      # Android SDK 36
       - name: Instalar Android SDK 36
         shell: bash
         run: |
           set -e
 
-          SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+
+          if [ -z "$SDK_ROOT" ]; then
+            echo "ERRO: Android SDK não encontrado"
+            exit 1
+          fi
+
           export ANDROID_HOME="$SDK_ROOT"
+          export ANDROID_SDK_ROOT="$SDK_ROOT"
 
           SDKMANAGER=$(find "$SDK_ROOT/cmdline-tools" \
             -type f -name sdkmanager | sort -V | tail -n 1)
@@ -49,53 +59,72 @@ jobs:
             exit 1
           fi
 
+          # Aceitar licenças sem falha Broken pipe
+          set +o pipefail
           yes | "$SDKMANAGER" --licenses
+          set -o pipefail
 
+          # Instalar SDK e ferramentas
           "$SDKMANAGER" --install \
             "platforms;android-36" \
             "build-tools;36.0.0"
 
+          echo "SDK 36 instalado!"
+
+      # Preparar projeto
       - name: Preparar projeto Flutter
         shell: bash
         run: |
-          if [ -f pubspec.yaml ]; then
-            echo "FLUTTER_PROJECT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          set -e
+
+          if [ -f "pubspec.yaml" ]; then
+            PROJECT="$GITHUB_WORKSPACE"
           else
-            ZIP=$(find . -maxdepth 2 -name "*.zip" -type f | head -n 1)
+            ZIP=$(find . -maxdepth 2 \
+              -type f -name "*.zip" | head -n 1)
 
             if [ -z "$ZIP" ]; then
-              echo "ERRO: ZIP não encontrado"
+              echo "ERRO: ZIP do projeto não encontrado"
               exit 1
             fi
 
             mkdir -p extraido
             unzip -q "$ZIP" -d extraido
 
-            PUBSPEC=$(find extraido -name pubspec.yaml -type f | head -n 1)
+            PUBSPEC=$(find extraido \
+              -type f -name pubspec.yaml | head -n 1)
 
             if [ -z "$PUBSPEC" ]; then
               echo "ERRO: pubspec.yaml não encontrado"
               exit 1
             fi
 
-            echo "FLUTTER_PROJECT=$(dirname "$PUBSPEC")" >> "$GITHUB_ENV"
+            PROJECT=$(dirname "$PUBSPEC")
           fi
 
+          echo "FLUTTER_PROJECT=$PROJECT" >> "$GITHUB_ENV"
+
+          echo "Projeto localizado: $PROJECT"
+
+      # Dependências
       - name: Baixar dependências
         run: |
           cd "$FLUTTER_PROJECT"
           flutter pub get
 
+      # Verificação
       - name: Verificar Flutter
         run: |
           cd "$FLUTTER_PROJECT"
           flutter doctor -v
 
+      # Compilar
       - name: Compilar APK Release
         run: |
           cd "$FLUTTER_PROJECT"
           flutter build apk --release
 
+      # Gerar certificados
       - name: Gerar SHA1 e SHA256
         shell: bash
         run: |
@@ -104,31 +133,35 @@ jobs:
           APK="$FLUTTER_PROJECT/build/app/outputs/flutter-apk/app-release.apk"
 
           if [ ! -f "$APK" ]; then
-            echo "APK não encontrado"
+            echo "ERRO: APK não encontrado"
             exit 1
           fi
 
           APKSIGNER=$(find "$ANDROID_HOME/build-tools" \
-            -name apksigner -type f | sort -V | tail -n 1)
+            -type f -name apksigner | sort -V | tail -n 1)
 
           if [ -z "$APKSIGNER" ]; then
-            echo "Apksigner não encontrado"
+            echo "ERRO: apksigner não encontrado"
             exit 1
           fi
 
+          # Verificar assinatura e imprimir fingerprints
           "$APKSIGNER" verify --print-certs "$APK" \
             | tee "$GITHUB_WORKSPACE/fingerprints.txt"
 
+          # Copiar APK
           cp "$APK" "$GITHUB_WORKSPACE/LoveMix.apk"
 
+          # Resumo do GitHub
           {
-            echo "## Certificados LoveMix"
+            echo "## LoveMix - Certificados"
             echo '```text'
             cat "$GITHUB_WORKSPACE/fingerprints.txt"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Salvar APK e SHA
+      # Salvar arquivos
+      - name: Salvar APK e SHA1 SHA256
         uses: actions/upload-artifact@v4
         with:
           name: LoveMix-APK-SHA1-SHA256
