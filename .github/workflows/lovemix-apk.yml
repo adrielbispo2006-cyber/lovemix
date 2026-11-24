@@ -1,5 +1,5 @@
 
-name: LoveMix - Compilar APK e gerar SHA1 SHA256
+name: LoveMix - Compilar APK e gerar SHA
 
 on:
   workflow_dispatch:
@@ -26,24 +26,49 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Localizar projeto Flutter
+        run: |
+          PROJECT_DIR=$(find . -name pubspec.yaml \
+            -not -path '*/.dart_tool/*' \
+            -not -path '*/build/*' \
+            -print -quit | xargs -r dirname)
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERRO: pubspec.yaml não encontrado."
+            exit 1
+          fi
+
+          echo "Projeto encontrado em: $PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
       - name: Instalar dependências
-        run: flutter pub get
+        run: |
+          cd "$PROJECT_DIR"
+          flutter pub get
 
       - name: Compilar APK
-        run: flutter build apk --debug
+        run: |
+          cd "$PROJECT_DIR"
+          flutter build apk --debug
 
       - name: Gerar SHA1 e SHA256
         run: |
-          APK="build/app/outputs/flutter-apk/app-debug.apk"
-          echo "## ASSINATURAS DO APK" >> $GITHUB_STEP_SUMMARY
-          echo '### SHA-1' >> $GITHUB_STEP_SUMMARY
-          keytool -printcert -jarfile "$APK" | grep -E 'SHA1:|SHA256:' | tee fingerprints.txt
-          cat fingerprints.txt >> $GITHUB_STEP_SUMMARY
+          APK="$PROJECT_DIR/build/app/outputs/flutter-apk/app-debug.apk"
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" \
+            -name apksigner -type f | sort -V | tail -n 1)
+
+          "$APKSIGNER" verify --print-certs "$APK" \
+            | tee "$GITHUB_WORKSPACE/fingerprints.txt"
+
+          {
+            echo "## SHA-1 e SHA-256"
+            cat "$GITHUB_WORKSPACE/fingerprints.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Salvar APK e assinaturas
         uses: actions/upload-artifact@v4
         with:
           name: LoveMix-APK-SHA
           path: |
-            build/app/outputs/flutter-apk/app-debug.apk
+            **/build/app/outputs/flutter-apk/app-debug.apk
             fingerprints.txt
