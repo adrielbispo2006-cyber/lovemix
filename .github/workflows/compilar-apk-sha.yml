@@ -1,0 +1,327 @@
+name: LoveMix - Compilar APK + mostrar SHA-1 e SHA-256
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lovemix-apk-sha-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GRADLE_VERSION: '9.3.1'
+  ANDROID_PLATFORM: '37'
+  ANDROID_BUILD_TOOLS: '36.0.0'
+
+jobs:
+  apk:
+    name: Compilar APK release
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Baixar o repositório
+        uses: actions/checkout@v4
+
+      # Aceita o projeto na raiz do repositório OU dentro de um ZIP enviado.
+      - name: Localizar o projeto LoveMix
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f pubspec.yaml && -f lib/main.dart ]]; then
+            PROJECT_DIR="$GITHUB_WORKSPACE"
+          else
+            ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname '*.zip' | sort | tail -n 1)"
+            if [[ -z "$ZIP_FILE" ]]; then
+              echo "::error::Não achei pubspec.yaml na raiz nem nenhum arquivo .zip. Envie o projeto (ou o ZIP) para o repositório."
+              exit 1
+            fi
+            echo "Usando ZIP: $ZIP_FILE"
+            mkdir -p "$GITHUB_WORKSPACE/extracted"
+            unzip -q -o "$ZIP_FILE" -d "$GITHUB_WORKSPACE/extracted" -x '__MACOSX/*'
+            PUBSPEC="$(find "$GITHUB_WORKSPACE/extracted" -type f -name pubspec.yaml \
+              -not -path '*/.dart_tool/*' -not -path '*/build/*' -not -path '*/__MACOSX/*' | head -n 1)"
+            if [[ -z "$PUBSPEC" ]]; then
+              echo "::error::pubspec.yaml não encontrado dentro do ZIP."
+              exit 1
+            fi
+            PROJECT_DIR="$(dirname "$PUBSPEC")"
+          fi
+          PROJECT_DIR="$(realpath "$PROJECT_DIR")"
+          test -f "$PROJECT_DIR/lib/main.dart"
+          test -d "$PROJECT_DIR/android"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Projeto: $PROJECT_DIR"
+
+      - name: Instalar Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Instalar Gradle ${{ env.GRADLE_VERSION }}
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+
+      - name: Instalar Flutter (estável)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Preparar Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager 2>/dev/null | sort -V | tail -n 1 || true)"
+          if [[ -z "$SDKMANAGER" ]]; then
+            echo "::warning::sdkmanager não encontrado; o Gradle tentará baixar o que faltar."
+            exit 0
+          fi
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          # Se algum pacote não existir, segue em frente: o Gradle baixa o necessário.
+          "$SDKMANAGER" --install "platforms;android-${ANDROID_PLATFORM}" "build-tools;${ANDROID_BUILD_TOOLS}" "platform-tools" \
+            || echo "::warning::Não deu para pré-instalar o SDK; o Gradle vai baixar sozinho."
+
+      # O gradlew do projeto não tem o gradle-wrapper.jar. Aqui ele passa a usar
+      # o Gradle instalado acima, na versão exigida pelo plugin do Android.
+      - name: Configurar Gradle do projeto
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$PROJECT_DIR/android/gradle/wrapper"
+          cat > "$PROJECT_DIR/android/gradle/wrapper/gradle-wrapper.properties" <<PROPERTIES
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip
+          networkTimeout=120000
+          validateDistributionUrl=true
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          PROPERTIES
+          sed -i 's/^ *//' "$PROJECT_DIR/android/gradle/wrapper/gradle-wrapper.properties"
+          printf '#!/usr/bin/env bash\nset -euo pipefail\nexec gradle "$@"\n' > "$PROJECT_DIR/android/gradlew"
+          chmod 755 "$PROJECT_DIR/android/gradlew"
+          gradle --version | tee /tmp/gradle-version.txt
+          grep -q "Gradle ${GRADLE_VERSION}" /tmp/gradle-version.txt
+
+      # Guarda a chave no cache do GitHub: as próximas compilações reaproveitam a MESMA
+      # chave e o SHA-1/SHA-256 continua igual (o cache expira se ficar 7 dias sem uso).
+      - name: Restaurar chave guardada
+        uses: actions/cache@v4
+        with:
+          path: ~/.lovemix-key
+          key: lovemix-keystore-v1
+
+      - name: Preparar assinatura do APK
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYDIR="$HOME/.lovemix-key"
+          mkdir -p "$KEYDIR" "$RUNNER_TEMP/signing"
+          if [[ -n "${KEYSTORE_BASE64:-}" && -n "${STORE_PASSWORD:-}" && -n "${KEY_ALIAS:-}" && -n "${KEY_PASSWORD:-}" ]]; then
+            echo "Chave: secrets do GitHub."
+            JKS="$RUNNER_TEMP/signing/release.jks"
+            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$JKS"
+          elif [[ -s "$KEYDIR/release.jks" && -s "$KEYDIR/pass.txt" ]]; then
+            echo "Chave: reaproveitada de compilação anterior (mesmo SHA)."
+            JKS="$KEYDIR/release.jks"
+            STORE_PASSWORD="$(cat "$KEYDIR/pass.txt")"; KEY_PASSWORD="$STORE_PASSWORD"; KEY_ALIAS="lovemix"
+          else
+            echo "Chave: criando uma nova (primeira compilação)."
+            JKS="$KEYDIR/release.jks"
+            STORE_PASSWORD="$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20)"
+            KEY_PASSWORD="$STORE_PASSWORD"; KEY_ALIAS="lovemix"
+            keytool -genkeypair -keystore "$JKS" -storetype JKS -alias "$KEY_ALIAS" \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$STORE_PASSWORD" -keypass "$KEY_PASSWORD" \
+              -dname "CN=LoveMix, OU=App, O=LoveMix, C=BR" >/dev/null 2>&1
+            printf '%s' "$STORE_PASSWORD" > "$KEYDIR/pass.txt"
+            chmod 600 "$KEYDIR/pass.txt"
+          fi
+          test -s "$JKS"
+          {
+            echo "ANDROID_KEYSTORE_PATH=$JKS"
+            echo "ANDROID_KEYSTORE_PASSWORD=$STORE_PASSWORD"
+            echo "ANDROID_KEY_ALIAS=$KEY_ALIAS"
+            echo "ANDROID_KEY_PASSWORD=$KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+      - name: Conferir se o SHA-1 da chave está no google-services.json
+        shell: bash
+        run: |
+          set +e
+          GS="$PROJECT_DIR/android/app/google-services.json"
+          [[ -f "$GS" ]] || GS="$PROJECT_DIR/google-services.json"
+          CERT_SHA1="$(keytool -list -v -keystore "$ANDROID_KEYSTORE_PATH" -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS" 2>/dev/null | sed -n 's/.*SHA1: *//p' | head -n 1 | tr -d ':' | tr 'A-F' 'a-f')"
+          python3 - "$GS" "$CERT_SHA1" <<'PY'
+          import json, sys
+          path, sha1 = sys.argv[1], sys.argv[2].strip().lower()
+          data = json.load(open(path))
+          hashes = set()
+          for c in data.get("client", []):
+              for o in c.get("oauth_client", []):
+                  if o.get("client_type") == 1:
+                      hashes.add(o.get("android_info", {}).get("certificate_hash", "").lower())
+          if not hashes:
+              print("::warning::O google-services.json NAO tem cliente OAuth Android. Cadastre SHA-1 e SHA-256 no Firebase, baixe o google-services.json novo e substitua os dois arquivos.")
+          elif sha1 not in hashes:
+              print("::warning::O SHA-1 desta chave (" + sha1 + ") nao esta no google-services.json. Cadastre-o no Firebase e baixe o arquivo novo. Login Google vai dar DEVELOPER_ERROR.")
+          else:
+              print("OK: o SHA-1 da chave de assinatura esta no google-services.json.")
+          PY
+          exit 0
+
+      - name: Baixar dependências (flutter pub get)
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: flutter pub get
+
+      # Garante o local.properties que o settings.gradle exige.
+      - name: Gerar android/local.properties
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          FLUTTER_SDK="$(dirname "$(dirname "$(readlink -f "$(command -v flutter)")")")"
+          {
+            echo "flutter.sdk=$FLUTTER_SDK"
+            echo "sdk.dir=$ANDROID_HOME"
+          } > android/local.properties
+          cat android/local.properties
+
+      # Alguns plugins antigos do ZEGO ainda usam jcenter(), que foi desligado.
+      - name: Corrigir jcenter() nos plugins ZEGO
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+          cache = Path.home() / ".pub-cache/hosted/pub.dev"
+          fixed = 0
+          for android_dir in cache.glob("zego_*/android"):
+              for f in list(android_dir.glob("*.gradle")) + list(android_dir.glob("*.gradle.kts")):
+                  text = f.read_text()
+                  new = re.sub(r"\bjcenter\s*\(\s*\)", "mavenCentral()", text)
+                  if new != text:
+                      f.write_text(new)
+                      fixed += 1
+          print(f"Arquivos ZEGO ajustados: {fixed}")
+          PY
+
+      # Mostra erros de código em texto claro, sem travar o build por avisos.
+      - name: Analisar o código Dart
+        working-directory: ${{ env.PROJECT_DIR }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          flutter analyze --no-fatal-infos --no-fatal-warnings 2>&1 | tee /tmp/analyze.txt
+          {
+            echo "### Erros encontrados pelo flutter analyze"
+            echo '```'
+            grep -E "^\s*error •" /tmp/analyze.txt | head -n 50 || echo "Nenhum erro."
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Compilar o APK release
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Duas tentativas: protege contra falha de rede ao baixar dependências.
+          for attempt in 1 2; do
+            if flutter build apk --release; then
+              break
+            fi
+            if [[ "$attempt" == "2" ]]; then
+              echo "::error::A compilação falhou. Veja as linhas de erro acima (procure por 'error:' ou 'FAILURE')."
+              exit 1
+            fi
+            echo "::warning::Tentativa $attempt falhou; tentando de novo."
+            sleep 10
+          done
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+          [[ -s "$APK" ]] || APK="$(find build/app/outputs/flutter-apk -maxdepth 1 -type f -name '*.apk' | head -n 1)"
+          if [[ -z "${APK:-}" || ! -s "$APK" ]]; then
+            echo "::error::O APK não foi gerado."
+            exit 1
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp "$APK" "$GITHUB_WORKSPACE/dist/LoveMix-release.apk"
+
+      - name: Conferir o APK e mostrar SHA-1 e SHA-256
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$GITHUB_WORKSPACE/dist/LoveMix-release.apk"
+          test -s "$APK"
+          SIZE="$(du -h "$APK" | awk '{print $1}')"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner 2>/dev/null | sort -V | tail -n 1 || true)"
+          SHA1="não disponível"; SHA256="não disponível"
+          if [[ -n "$APKSIGNER" ]]; then
+            OUT="$("$APKSIGNER" verify --print-certs "$APK" 2>&1 || true)"
+            SHA1="$(echo "$OUT" | sed -n 's/.*certificate SHA-1 digest: *//p' | head -n 1)"
+            SHA256="$(echo "$OUT" | sed -n 's/.*certificate SHA-256 digest: *//p' | head -n 1)"
+            SHA1="${SHA1:-não disponível}"; SHA256="${SHA256:-não disponível}"
+          fi
+          colon() { echo "$1" | tr 'a-f' 'A-F' | sed 's/../&:/g; s/:$//'; }
+          SHA1_C="$SHA1"; SHA256_C="$SHA256"
+          if [[ "$SHA1" != "não disponível" ]]; then SHA1_C="$(colon "$SHA1")"; fi
+          if [[ "$SHA256" != "não disponível" ]]; then SHA256_C="$(colon "$SHA256")"; fi
+          echo "SHA-1:   $SHA1_C"
+          echo "SHA-256: $SHA256_C"
+          echo "FINAL_SHA1=$SHA1_C" >> "$GITHUB_ENV"
+          echo "FINAL_SHA256=$SHA256_C" >> "$GITHUB_ENV"
+          echo "::notice title=SHA-1::$SHA1_C"
+          echo "::notice title=SHA-256::$SHA256_C"
+          {
+            echo "## Chaves do certificado (copie e cole no Firebase)"
+            echo ""
+            echo "**SHA-1**"
+            echo '```'
+            echo "$SHA1_C"
+            echo '```'
+            echo "**SHA-256**"
+            echo '```'
+            echo "$SHA256_C"
+            echo '```'
+            echo "Tamanho do APK: $SIZE"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publicar o APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LoveMix-APK
+          path: dist/LoveMix-release.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: SHA-1 e SHA-256 para copiar
+        if: success()
+        shell: bash
+        run: |
+          echo ""
+          echo "=============================================================="
+          echo "  COMPILAÇÃO TERMINADA - COPIE AS CHAVES ABAIXO"
+          echo "=============================================================="
+          echo ""
+          echo "SHA-1:"
+          echo "$FINAL_SHA1"
+          echo ""
+          echo "SHA-256:"
+          echo "$FINAL_SHA256"
+          echo ""
+          echo "Firebase > Configurações do projeto > Seus apps > com.example.lovemix > Adicionar impressão digital"
+          echo "=============================================================="
