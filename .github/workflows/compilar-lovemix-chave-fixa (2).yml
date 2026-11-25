@@ -1,295 +1,127 @@
-name: LoveMix - Compilar APK (chave fixa)
+
+name: Gerar APK LoveMix
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
 
 permissions:
   contents: read
 
-concurrency:
-  group: lovemix-apk-fixa-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  GRADLE_VERSION: '9.3.1'
-  ANDROID_PLATFORM: '37'
-  ANDROID_BUILD_TOOLS: '36.0.0'
-
 jobs:
-  apk:
-    name: Compilar APK release
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
 
     steps:
-      - name: Baixar o repositório
+      - name: Baixar projeto
         uses: actions/checkout@v4
 
-      # Aceita o projeto na raiz do repositório OU dentro de um ZIP enviado.
-      - name: Localizar o projeto LoveMix
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -f pubspec.yaml && -f lib/main.dart ]]; then
-            PROJECT_DIR="$GITHUB_WORKSPACE"
-          else
-            ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname '*.zip' | sort | tail -n 1)"
-            if [[ -z "$ZIP_FILE" ]]; then
-              echo "::error::Não achei pubspec.yaml na raiz nem nenhum arquivo .zip. Envie o projeto (ou o ZIP) para o repositório."
-              exit 1
-            fi
-            echo "Usando ZIP: $ZIP_FILE"
-            mkdir -p "$GITHUB_WORKSPACE/extracted"
-            unzip -q -o "$ZIP_FILE" -d "$GITHUB_WORKSPACE/extracted" -x '__MACOSX/*'
-            PUBSPEC="$(find "$GITHUB_WORKSPACE/extracted" -type f -name pubspec.yaml \
-              -not -path '*/.dart_tool/*' -not -path '*/build/*' -not -path '*/__MACOSX/*' | head -n 1)"
-            if [[ -z "$PUBSPEC" ]]; then
-              echo "::error::pubspec.yaml não encontrado dentro do ZIP."
-              exit 1
-            fi
-            PROJECT_DIR="$(dirname "$PUBSPEC")"
-          fi
-          PROJECT_DIR="$(realpath "$PROJECT_DIR")"
-          test -f "$PROJECT_DIR/lib/main.dart"
-          test -d "$PROJECT_DIR/android"
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Projeto: $PROJECT_DIR"
-
-      - name: Instalar Java 17
+      - name: Preparar Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Instalar Gradle ${{ env.GRADLE_VERSION }}
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: ${{ env.GRADLE_VERSION }}
-
-      - name: Instalar Flutter (estável)
+      - name: Preparar Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
-      - name: Preparar Android SDK
+      - name: Localizar projeto
         shell: bash
         run: |
-          set -euo pipefail
-          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
-          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
-          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager 2>/dev/null | sort -V | tail -n 1 || true)"
-          if [[ -z "$SDKMANAGER" ]]; then
-            echo "::warning::sdkmanager não encontrado; o Gradle tentará baixar o que faltar."
-            exit 0
+          if [ -f pubspec.yaml ]; then
+            echo "PROJECT_DIR=." >> $GITHUB_ENV
+          elif [ -d lovemix ] && [ -f lovemix/pubspec.yaml ]; then
+            echo "PROJECT_DIR=lovemix" >> $GITHUB_ENV
+          else
+            mkdir -p _source
+            ZIP=$(find . -maxdepth 2 -name '*.zip' | head -n 1)
+            if [ -z "$ZIP" ]; then
+              echo "Projeto Flutter não encontrado."
+              exit 1
+            fi
+            unzip -q "$ZIP" -d _source
+            PROJECT=$(find _source -name pubspec.yaml -printf '%h\n' | head -n 1)
+            if [ -z "$PROJECT" ]; then
+              echo "pubspec.yaml não encontrado."
+              exit 1
+            fi
+            echo "PROJECT_DIR=$PROJECT" >> $GITHUB_ENV
           fi
-          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
-          # Se algum pacote não existir, segue em frente: o Gradle baixa o necessário.
-          "$SDKMANAGER" --install "platforms;android-${ANDROID_PLATFORM}" "build-tools;${ANDROID_BUILD_TOOLS}" "platform-tools" \
-            || echo "::warning::Não deu para pré-instalar o SDK; o Gradle vai baixar sozinho."
 
-      # O gradlew do projeto não tem o gradle-wrapper.jar. Aqui ele passa a usar
-      # o Gradle instalado acima, na versão exigida pelo plugin do Android.
-      - name: Configurar Gradle do projeto
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$PROJECT_DIR/android/gradle/wrapper"
-          cat > "$PROJECT_DIR/android/gradle/wrapper/gradle-wrapper.properties" <<PROPERTIES
-          distributionBase=GRADLE_USER_HOME
-          distributionPath=wrapper/dists
-          distributionUrl=https\://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip
-          networkTimeout=120000
-          validateDistributionUrl=true
-          zipStoreBase=GRADLE_USER_HOME
-          zipStorePath=wrapper/dists
-          PROPERTIES
-          sed -i 's/^ *//' "$PROJECT_DIR/android/gradle/wrapper/gradle-wrapper.properties"
-          printf '#!/usr/bin/env bash\nset -euo pipefail\nexec gradle "$@"\n' > "$PROJECT_DIR/android/gradlew"
-          chmod 755 "$PROJECT_DIR/android/gradlew"
-          gradle --version | tee /tmp/gradle-version.txt
-          grep -q "Gradle ${GRADLE_VERSION}" /tmp/gradle-version.txt
-
-      # Usa os secrets ANDROID_* se existirem. Sem secrets, usa a chave fixa
-      # embutida abaixo, assim o SHA-1/SHA-256 é SEMPRE o mesmo em todo build.
-      - name: Assinatura fixa (secrets ou chave embutida)
+      - name: Configurar chave persistente
         shell: bash
         env:
-          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEY_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          set -euo pipefail
-          if [[ -z "${KEYSTORE_BASE64:-}" || -z "${STORE_PASSWORD:-}" || -z "${KEY_ALIAS:-}" || -z "${KEY_PASSWORD:-}" ]]; then
-            echo "Sem secrets completos: usando a chave fixa embutida do LoveMix."
-            KEYSTORE_BASE64='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'
-            STORE_PASSWORD='LoveMixOlGgAKFOGfbJ'
-            KEY_ALIAS='lovemix'
-            KEY_PASSWORD='LoveMixOlGgAKFOGfbJ'
-          fi
-          mkdir -p "$RUNNER_TEMP/signing"
-          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/signing/release.jks"
-          test -s "$RUNNER_TEMP/signing/release.jks"
-          FP="$(keytool -list -v -keystore "$RUNNER_TEMP/signing/release.jks" -storepass "$STORE_PASSWORD" -alias "$KEY_ALIAS" 2>/dev/null | grep -E 'SHA1:|SHA256:' | sed 's/^ *//')"
-          echo "$FP"
-          SHA1_K="$(echo "$FP" | sed -n 's/^SHA1: *//p' | head -n 1)"
-          SHA256_K="$(echo "$FP" | sed -n 's/^SHA256: *//p' | head -n 1)"
-          {
-            echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/signing/release.jks"
-            echo "ANDROID_KEYSTORE_PASSWORD=$STORE_PASSWORD"
-            echo "ANDROID_KEY_ALIAS=$KEY_ALIAS"
-            echo "ANDROID_KEY_PASSWORD=$KEY_PASSWORD"
-            echo "CERT_SHA1_KEYTOOL=$SHA1_K"
-            echo "CERT_SHA256_KEYTOOL=$SHA256_K"
-          } >> "$GITHUB_ENV"
-
-      - name: Conferir se o SHA-1 da chave está no google-services.json
-        shell: bash
-        run: |
-          set +e
-          GS="$PROJECT_DIR/android/app/google-services.json"
-          [[ -f "$GS" ]] || GS="$PROJECT_DIR/google-services.json"
-          CERT_SHA1="$(keytool -list -v -keystore "$ANDROID_KEYSTORE_PATH" -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS" 2>/dev/null | sed -n 's/.*SHA1: *//p' | head -n 1 | tr -d ':' | tr 'A-F' 'a-f')"
-          python3 - "$GS" "$CERT_SHA1" <<'PY'
-          import json, sys
-          path, sha1 = sys.argv[1], sys.argv[2].strip().lower()
-          data = json.load(open(path))
-          hashes = set()
-          for c in data.get("client", []):
-              for o in c.get("oauth_client", []):
-                  if o.get("client_type") == 1:
-                      hashes.add(o.get("android_info", {}).get("certificate_hash", "").lower())
-          if not hashes:
-              print("::warning::O google-services.json NAO tem cliente OAuth Android. Cadastre SHA-1 e SHA-256 no Firebase, baixe o google-services.json novo e substitua os dois arquivos.")
-          elif sha1 not in hashes:
-              print("::warning::O SHA-1 desta chave (" + sha1 + ") nao esta no google-services.json. Cadastre-o no Firebase e baixe o arquivo novo. Login Google vai dar DEVELOPER_ERROR.")
-          else:
-              print("OK: o SHA-1 da chave de assinatura esta no google-services.json.")
-          PY
-          exit 0
-
-      - name: Baixar dependências (flutter pub get)
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: flutter pub get
-
-      # Garante o local.properties que o settings.gradle exige.
-      - name: Gerar android/local.properties
-        working-directory: ${{ env.PROJECT_DIR }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          FLUTTER_SDK="$(dirname "$(dirname "$(readlink -f "$(command -v flutter)")")")"
-          {
-            echo "flutter.sdk=$FLUTTER_SDK"
-            echo "sdk.dir=$ANDROID_HOME"
-          } > android/local.properties
-          cat android/local.properties
-
-      # Alguns plugins antigos do ZEGO ainda usam jcenter(), que foi desligado.
-      - name: Corrigir jcenter() nos plugins ZEGO
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 <<'PY'
-          from pathlib import Path
-          import re
-          cache = Path.home() / ".pub-cache/hosted/pub.dev"
-          fixed = 0
-          for android_dir in cache.glob("zego_*/android"):
-              for f in list(android_dir.glob("*.gradle")) + list(android_dir.glob("*.gradle.kts")):
-                  text = f.read_text()
-                  new = re.sub(r"\bjcenter\s*\(\s*\)", "mavenCentral()", text)
-                  if new != text:
-                      f.write_text(new)
-                      fixed += 1
-          print(f"Arquivos ZEGO ajustados: {fixed}")
-          PY
-
-      # Mostra erros de código em texto claro, sem travar o build por avisos.
-      - name: Analisar o código Dart
-        working-directory: ${{ env.PROJECT_DIR }}
-        continue-on-error: true
-        shell: bash
-        run: |
-          set +e
-          flutter analyze --no-fatal-infos --no-fatal-warnings 2>&1 | tee /tmp/analyze.txt
-          {
-            echo "### Erros encontrados pelo flutter analyze"
-            echo '```'
-            grep -E "^\s*error •" /tmp/analyze.txt | head -n 50 || echo "Nenhum erro."
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Compilar o APK release
-        working-directory: ${{ env.PROJECT_DIR }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Duas tentativas: protege contra falha de rede ao baixar dependências.
-          for attempt in 1 2; do
-            if flutter build apk --release; then
-              break
-            fi
-            if [[ "$attempt" == "2" ]]; then
-              echo "::error::A compilação falhou. Veja as linhas de erro acima (procure por 'error:' ou 'FAILURE')."
-              exit 1
-            fi
-            echo "::warning::Tentativa $attempt falhou; tentando de novo."
-            sleep 10
-          done
-          APK="build/app/outputs/flutter-apk/app-release.apk"
-          [[ -s "$APK" ]] || APK="$(find build/app/outputs/flutter-apk -maxdepth 1 -type f -name '*.apk' | head -n 1)"
-          if [[ -z "${APK:-}" || ! -s "$APK" ]]; then
-            echo "::error::O APK não foi gerado."
+          if [ -z "$KEY_BASE64" ] || [ -z "$STORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo "ERRO: configure os quatro secrets da assinatura Android."
             exit 1
           fi
-          mkdir -p "$GITHUB_WORKSPACE/dist"
-          cp "$APK" "$GITHUB_WORKSPACE/dist/LoveMix-release.apk"
 
-      - name: Conferir o APK e mostrar SHA-1 e SHA-256
-        shell: bash
+          mkdir -p "$HOME/lovemix-signing"
+          echo "$KEY_BASE64" | base64 -d > "$HOME/lovemix-signing/lovemix.jks"
+
+          echo "ANDROID_KEYSTORE_PATH=$HOME/lovemix-signing/lovemix.jks" >> $GITHUB_ENV
+
+      - name: Instalar dependências
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          set -euo pipefail
-          APK="$GITHUB_WORKSPACE/dist/LoveMix-release.apk"
-          test -s "$APK"
-          SIZE="$(du -h "$APK" | awk '{print $1}')"
-          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner 2>/dev/null | sort -V | tail -n 1 || true)"
-          SHA1="não disponível"; SHA256="não disponível"
-          if [[ -n "$APKSIGNER" ]]; then
-            OUT="$("$APKSIGNER" verify --print-certs "$APK" 2>&1 || true)"
-            SHA1="$(echo "$OUT" | sed -n 's/.*certificate SHA-1 digest: *//p' | head -n 1)"
-            SHA256="$(echo "$OUT" | sed -n 's/.*certificate SHA-256 digest: *//p' | head -n 1)"
-            SHA1="${SHA1:-não disponível}"; SHA256="${SHA256:-não disponível}"
-          fi
-          colon() { echo "$1" | tr 'a-f' 'A-F' | sed 's/../&:/g; s/:$//'; }
-          # Plano B: se o apksigner não devolver o SHA, usa o do keytool (mesma chave).
-          if [[ "$SHA1" == "não disponível" && -n "${CERT_SHA1_KEYTOOL:-}" ]]; then SHA1="$(echo "$CERT_SHA1_KEYTOOL" | tr -d ':')"; fi
-          if [[ "$SHA256" == "não disponível" && -n "${CERT_SHA256_KEYTOOL:-}" ]]; then SHA256="$(echo "$CERT_SHA256_KEYTOOL" | tr -d ':')"; fi
-          SHA1_C="$SHA1"; SHA256_C="$SHA256"
-          if [[ "$SHA1" != "não disponível" ]]; then SHA1_C="$(colon "$SHA1")"; fi
-          if [[ "$SHA256" != "não disponível" ]]; then SHA256_C="$(colon "$SHA256")"; fi
-          echo "SHA-1:   $SHA1_C"
-          echo "SHA-256: $SHA256_C"
-          {
-            echo "## Chaves do certificado (copie e cole no Firebase)"
-            echo ""
-            echo "**SHA-1**"
-            echo '```'
-            echo "$SHA1_C"
-            echo '```'
-            echo "**SHA-256**"
-            echo '```'
-            echo "$SHA256_C"
-            echo '```'
-            echo "Tamanho do APK: $SIZE"
-          } >> "$GITHUB_STEP_SUMMARY"
+          flutter pub get
 
-      - name: Publicar o APK
+      - name: Compilar APK Release
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ env.ANDROID_KEYSTORE_PATH }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          flutter build apk --release
+
+      - name: Calcular SHA-1 e SHA-256
+        env:
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          keytool -list -v \
+            -keystore "$HOME/lovemix-signing/lovemix.jks" \
+            -storepass "$STORE_PASSWORD" \
+            -alias "$KEY_ALIAS" > fingerprints.txt
+
+          SHA1=$(grep -m1 'SHA1:' fingerprints.txt | sed 's/.*SHA1: //')
+          SHA256=$(grep -m1 'SHA256:' fingerprints.txt | sed 's/.*SHA256: //')
+
+          echo "## 🔐 LoveMix - Certificados Firebase" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### SHA-1" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "$SHA1" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "### SHA-256" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "$SHA256" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          echo "SHA-1: $SHA1"
+          echo "SHA-256: $SHA256"
+
+      - name: Preparar APK
+        run: |
+          mkdir -p dist
+          cp "${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/app-release.apk" dist/LoveMix-release.apk
+
+      - name: Salvar APK e fingerprints
         uses: actions/upload-artifact@v4
         with:
-          name: LoveMix-APK
-          path: dist/LoveMix-release.apk
-          if-no-files-found: error
+          name: LoveMix-APK-e-Fingerprints
+          path: |
+            dist/LoveMix-release.apk
+            fingerprints.txt
           retention-days: 30
