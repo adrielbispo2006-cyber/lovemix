@@ -111,45 +111,20 @@ jobs:
           gradle --version | tee /tmp/gradle-version.txt
           grep -q "Gradle ${GRADLE_VERSION}" /tmp/gradle-version.txt
 
-      # Guarda a chave no cache do GitHub: as próximas compilações reaproveitam a MESMA
-      # chave e o SHA-1/SHA-256 continua igual (o cache expira se ficar 7 dias sem uso).
-      - name: Restaurar chave guardada
-        uses: actions/cache@v4
-        with:
-          path: ~/.lovemix-key
-          key: lovemix-keystore-v1
-
-      - name: Preparar assinatura do APK
+      # Gera uma chave temporária NOVA em cada execução. Não usa cache nem secrets antigos.
+      - name: Gerar chave temporária para esta compilação
         shell: bash
-        env:
-          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          KEYDIR="$HOME/.lovemix-key"
-          mkdir -p "$KEYDIR" "$RUNNER_TEMP/signing"
-          if [[ -n "${KEYSTORE_BASE64:-}" && -n "${STORE_PASSWORD:-}" && -n "${KEY_ALIAS:-}" && -n "${KEY_PASSWORD:-}" ]]; then
-            echo "Chave: secrets do GitHub."
-            JKS="$RUNNER_TEMP/signing/release.jks"
-            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$JKS"
-          elif [[ -s "$KEYDIR/release.jks" && -s "$KEYDIR/pass.txt" ]]; then
-            echo "Chave: reaproveitada de compilação anterior (mesmo SHA)."
-            JKS="$KEYDIR/release.jks"
-            STORE_PASSWORD="$(cat "$KEYDIR/pass.txt")"; KEY_PASSWORD="$STORE_PASSWORD"; KEY_ALIAS="lovemix"
-          else
-            echo "Chave: criando uma nova (primeira compilação)."
-            JKS="$KEYDIR/release.jks"
-            STORE_PASSWORD="$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20)"
-            KEY_PASSWORD="$STORE_PASSWORD"; KEY_ALIAS="lovemix"
-            keytool -genkeypair -keystore "$JKS" -storetype JKS -alias "$KEY_ALIAS" \
-              -keyalg RSA -keysize 2048 -validity 10000 \
-              -storepass "$STORE_PASSWORD" -keypass "$KEY_PASSWORD" \
-              -dname "CN=LoveMix, OU=App, O=LoveMix, C=BR" >/dev/null 2>&1
-            printf '%s' "$STORE_PASSWORD" > "$KEYDIR/pass.txt"
-            chmod 600 "$KEYDIR/pass.txt"
-          fi
+          mkdir -p "$RUNNER_TEMP/signing"
+          JKS="$RUNNER_TEMP/signing/release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.jks"
+          STORE_PASSWORD="$(openssl rand -hex 18)"
+          KEY_PASSWORD="$STORE_PASSWORD"
+          KEY_ALIAS="lovemix"
+          keytool -genkeypair -keystore "$JKS" -storetype JKS -alias "$KEY_ALIAS" \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass "$STORE_PASSWORD" -keypass "$KEY_PASSWORD" \
+            -dname "CN=LoveMix, OU=App, O=LoveMix, C=BR" >/dev/null 2>&1
           test -s "$JKS"
           {
             echo "ANDROID_KEYSTORE_PATH=$JKS"
@@ -157,6 +132,8 @@ jobs:
             echo "ANDROID_KEY_ALIAS=$KEY_ALIAS"
             echo "ANDROID_KEY_PASSWORD=$KEY_PASSWORD"
           } >> "$GITHUB_ENV"
+          echo "SHA-1 e SHA-256 da chave NOVA desta compilação:"
+          keytool -list -v -keystore "$JKS" -storepass "$STORE_PASSWORD" -alias "$KEY_ALIAS" | grep -E 'SHA1:|SHA256:'
 
       - name: Conferir se o SHA-1 da chave está no google-services.json
         shell: bash
