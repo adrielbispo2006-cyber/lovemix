@@ -1,0 +1,152 @@
+name: LoveMix - Compilar APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lovemix-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GRADLE_VERSION: '9.3.1'
+  ANDROID_PLATFORM: '37'
+  ANDROID_BUILD_TOOLS: '36.0.0'
+
+jobs:
+  apk:
+    name: Compilar APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Baixar o repositório
+        uses: actions/checkout@v4
+
+      - name: Localizar o projeto LoveMix
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f pubspec.yaml && -f lib/main.dart ]]; then
+            PROJECT_DIR="$GITHUB_WORKSPACE"
+          elif [[ -f lovemix/pubspec.yaml && -f lovemix/lib/main.dart ]]; then
+            PROJECT_DIR="$GITHUB_WORKSPACE/lovemix"
+          else
+            ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname '*.zip' | sort | tail -n 1)"
+            [[ -n "$ZIP_FILE" ]] || { echo "::error::Envie o projeto (ou o ZIP) para a raiz do repositório."; exit 1; }
+            mkdir -p "$GITHUB_WORKSPACE/extracted"
+            unzip -q -o "$ZIP_FILE" -d "$GITHUB_WORKSPACE/extracted" -x '__MACOSX/*'
+            PUBSPEC="$(find "$GITHUB_WORKSPACE/extracted" -type f -name pubspec.yaml -not -path '*/build/*' | head -n 1)"
+            [[ -n "$PUBSPEC" ]] || { echo "::error::pubspec.yaml não encontrado no ZIP."; exit 1; }
+            PROJECT_DIR="$(dirname "$PUBSPEC")"
+          fi
+          PROJECT_DIR="$(realpath "$PROJECT_DIR")"
+          test -f "$PROJECT_DIR/lib/main.dart" && test -d "$PROJECT_DIR/android"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Projeto: $PROJECT_DIR"
+
+      - name: Instalar Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Instalar Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+
+      - name: Instalar Flutter estável
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Preparar Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager 2>/dev/null | sort -V | tail -n 1 || true)"
+          if [[ -n "$SDKMANAGER" ]]; then
+            yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+            "$SDKMANAGER" --install "platforms;android-${ANDROID_PLATFORM}" "build-tools;${ANDROID_BUILD_TOOLS}" "platform-tools" || true
+          fi
+
+      # Sempre cria uma chave temporária nova a cada compilação (SHA-1 e SHA-256
+      # mudam em cada build). Não usa chave fixa dos Secrets.
+      - name: Configurar assinatura
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/lovemix-signing"
+          KS="$RUNNER_TEMP/lovemix-signing/release.jks"
+          rm -f "$KS"
+          STORE_PASSWORD="$(openssl rand -hex 12)"
+          KEY_PASSWORD="$STORE_PASSWORD"
+          KEY_ALIAS="lovemix"
+          keytool -genkeypair -keystore "$KS" -storetype PKCS12 -alias "$KEY_ALIAS" \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass "$STORE_PASSWORD" -keypass "$KEY_PASSWORD" \
+            -dname "CN=LoveMix, O=LoveMix, C=BR"
+          MODE="CHAVE TEMPORÁRIA (muda a cada compilação)"
+          test -s "$KS"
+          INFO="$(keytool -list -v -keystore "$KS" -storepass "$STORE_PASSWORD" -alias "$KEY_ALIAS" 2>/dev/null)"
+          SHA1="$(printf '%s\n' "$INFO" | sed -n 's/^[[:space:]]*SHA1: *//p' | head -n 1)"
+          SHA256="$(printf '%s\n' "$INFO" | sed -n 's/^[[:space:]]*SHA256: *//p' | head -n 1)"
+          {
+            echo "ANDROID_KEYSTORE_PATH=$KS"
+            echo "ANDROID_KEYSTORE_PASSWORD=$STORE_PASSWORD"
+            echo "ANDROID_KEY_ALIAS=$KEY_ALIAS"
+            echo "ANDROID_KEY_PASSWORD=$KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+          {
+            echo "## Assinatura: $MODE"
+            echo "**SHA-1:** \`$SHA1\`"
+            echo ""
+            echo "**SHA-256:** \`$SHA256\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Preparar Gradle do projeto
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$PROJECT_DIR/android/gradle/wrapper"
+          cat > "$PROJECT_DIR/android/gradle/wrapper/gradle-wrapper.properties" <<PROPERTIES
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip
+          networkTimeout=120000
+          validateDistributionUrl=true
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          PROPERTIES
+          sed -i 's/^ *//' "$PROJECT_DIR/android/gradle/wrapper/gradle-wrapper.properties"
+          printf '#!/usr/bin/env bash\nset -euo pipefail\nexec gradle "$@"\n' > "$PROJECT_DIR/android/gradlew"
+          chmod 755 "$PROJECT_DIR/android/gradlew"
+
+      - name: Baixar dependências
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: flutter pub get
+
+      - name: Compilar APK release
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter build apk --release
+          APK="$PROJECT_DIR/build/app/outputs/flutter-apk/app-release.apk"
+          test -s "$APK"
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp "$APK" "$GITHUB_WORKSPACE/dist/LoveMix.apk"
+
+      - name: Publicar APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LoveMix-APK
+          path: dist/LoveMix.apk
+          if-no-files-found: error
+          retention-days: 30
